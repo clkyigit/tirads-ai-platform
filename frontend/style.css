@@ -233,3 +233,20 @@ body.mode-annot .research-banner { color: var(--accent); background: #0c1f29; bo
 .viewer-state.nosignal .vs-icon { width: 14px; height: 14px; flex: none; background: var(--warn); border: 0; }
 .viewer-state.nosignal .vs-title { font-size: 15px; white-space: nowrap; }
 .viewer-state.nosignal .vs-text { font-size: 13px; max-width: none; }
+
+/* Kontur eylem çubuğu */
+.contour-bar {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 3;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center;
+  max-width: calc(100% - 140px); padding: 6px 8px; border-radius: 9px;
+  background: rgba(13, 17, 23, .9); border: 1px solid var(--line); box-shadow: 0 4px 18px rgba(0,0,0,.45);
+}
+.contour-bar.pending { border-color: #2a6f8c; }
+.contour-bar button { padding: 4px 9px; font-size: 13px; }
+.contour-bar button.ghost { font-size: 15px; padding: 2px 9px; }
+.cb-state { font-size: 12.5px; font-weight: 600; color: var(--ok); padding: 0 4px; white-space: nowrap; }
+.contour-bar.pending .cb-state { color: #4cc3f0; }
+.cb-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
+.save-block { font-size: 12.5px; margin: -2px 0 8px; }
+.save-block:empty { display: none; }
+@media (max-width: 1000px) { .contour-bar { max-width: calc(100% - 16px); top: 34px; } }

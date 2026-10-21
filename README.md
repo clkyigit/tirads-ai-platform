@@ -62,10 +62,19 @@ Tarayıcı otomatik açılır: <http://127.0.0.1:8765>. Varsayılan olarak yaln�
 ## Muayene akışı
 
 1. Transvers kesitte nodülü bulun → **Space** (dondur) → nodüle tıklayın (AI). Kontur, genişlik (G) ve AP otomatik çizilir.
-2. **2** → longitudinal sekmesi → Space → nodüle tıklayın → uzunluk (U) çizilir.
-3. Konturu beğenmezseniz **D** ile elle çizin, ölçümleri **W / H / L** kumpaslarıyla düzeltin ya da mm değerlerini yazın.
-4. TI-RADS formunu doldurun. Şekil, AP/G oranından önerilir; değiştirebilirsiniz.
-5. Onay kutusunu işaretleyip **Onayla ve kaydet**.
+2. **AI konturunu kontrol edin.** AI'ın çizdiği kontur **kesikli mavi** görünür ve onaylanana kadar *öneri* sayılır. Görüntünün üstündeki çubuktan:
+   - **Düzenle (E):** konturu tutup sürükleyin; daire içindeki noktalar birlikte hareket eder. Daireyi fare tekerleği veya `[` `]` ile büyütüp küçültebilirsiniz.
+   - **Kısmi düzelt (K):** konturun üzerinden başlayıp yeni sınırı çizin, yine konturun üzerinde bitirin; yalnızca aradaki parça değişir.
+   - **Yeniden çiz (D):** konturu baştan kendiniz çizin.
+   - **AI tekrar (A):** nodülün başka bir noktasına tıklayarak modeli yeniden çalıştırın.
+   - **Geri al / Yinele (Ctrl+Z / Ctrl+Y)**, **Sil (Del)**. Geri al ile her zaman AI'ın ilk önerisine dönebilirsiniz.
+   - Uygunsa **Onayla (Enter)**. Onaylanan kontur **düz sarı** olur. Onaylanmamış AI konturu varken kayıt yapılamaz.
+3. **2** → longitudinal sekmesi → Space → nodüle tıklayın → uzunluk (U) çizilir → kontrol edip onaylayın.
+4. Gerekirse ölçümleri **W / H / L** kumpaslarıyla düzeltin ya da mm değerlerini yazın.
+5. TI-RADS formunu doldurun. Şekil, AP/G oranından önerilir; değiştirebilirsiniz.
+6. Onay kutusunu işaretleyip **Onayla ve kaydet**.
+
+Kayıtta AI'ın ilk konturu (`*_mask_ai.png`) ve radyoloğun son konturu (`*_mask.png`) ayrı saklanır. Raporda konturun AI'dan değiştirilmeden mi, düzeltilerek mi yoksa elle yeniden çizilerek mi onaylandığı ve AI–radyolog uyumu (Dice) yazılır.
 
 | Kısayol | İşlev |
 |---|---|
@@ -74,7 +83,11 @@ Tarayıcı otomatik açılır: <http://127.0.0.1:8765>. Varsayılan olarak yaln�
 | A | AI segmentasyon (nodüle tıkla) |
 | W / H / L | Genişlik / AP / Uzunluk kumpası |
 | D | Elle kontur (basılı tutup çiz ya da tıkla; Enter/ilk nokta ile kapat) |
-| E | Konturu sürükleyerek düzelt |
+| E | Konturu sürükleyerek düzelt (tekerlek / [ ] fırça boyutu) |
+| K | Konturun bir bölümünü yeniden çiz (kısmi düzeltme) |
+| Enter | AI konturunu onayla |
+| Ctrl+Z / Ctrl+Y | Geri al / Yinele |
+| Del | Konturu sil |
 | S | Etiketi kaydet (etiketleme modunda) |
 | Esc | Aracı bırak |
 

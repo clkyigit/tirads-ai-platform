@@ -38,6 +38,18 @@
       <img id="live" alt="Canlı USG görüntüsü">
       <canvas id="cv"></canvas>
       <div class="viewer-badge" id="viewerBadge">CANLI</div>
+      <div class="contour-bar" id="contourBar" hidden role="toolbar" aria-label="Kontur">
+        <span class="cb-state" id="cbState"></span>
+        <button id="cbConfirm" class="primary" title="Konturu onayla">Onayla <kbd>Enter</kbd></button>
+        <button data-cb="edit" title="Konturu sürükleyerek düzelt">Düzenle <kbd>E</kbd></button>
+        <button data-cb="splice" title="Konturun bir bölümünü yeniden çiz">Kısmi düzelt <kbd>K</kbd></button>
+        <button data-cb="draw" title="Konturu baştan çiz">Yeniden çiz <kbd>D</kbd></button>
+        <button id="cbAi" title="Nodüle tıklayarak AI'ı yeniden çalıştır">AI tekrar <kbd>A</kbd></button>
+        <span class="cb-sep"></span>
+        <button id="cbUndo" class="ghost" title="Geri al (Ctrl+Z)" aria-label="Geri al">&#8630;</button>
+        <button id="cbRedo" class="ghost" title="Yinele (Ctrl+Y)" aria-label="Yinele">&#8631;</button>
+        <button id="cbDelete" class="ghost" title="Konturu sil (Del)">Sil</button>
+      </div>
       <div class="viewer-msg" id="viewerMsg"></div>
       <div class="viewer-state" id="viewerState" hidden>
         <div class="vs-icon" id="vsIcon"></div>
@@ -59,6 +71,7 @@
         <button data-tool="length">Uzunluk <kbd>L</kbd></button>
         <button data-tool="draw" title="Basılı tutup sınırı çizin ya da noktalarla tıklayın">Elle çiz <kbd>D</kbd></button>
         <button data-tool="edit" title="Konturu tutup sürükleyerek düzeltin">Düzenle <kbd>E</kbd></button>
+        <button data-tool="splice" title="Konturun bir bölümünü yeniden çizin">Kısmi düzelt <kbd>K</kbd></button>
         <button id="btnClearView" class="ghost" title="Bu görünümdeki kontur ve ölçümleri sil">Temizle</button>
       </div>
     </div>
@@ -126,6 +139,7 @@
       <label>Radyolog<input id="radiologist" placeholder="Ad Soyad"></label>
       <label>Not<textarea id="notes" rows="2"></textarea></label>
       <label class="check"><input type="checkbox" id="approved"> Konturları, ölçümleri ve kategoriyi kontrol ettim, onaylıyorum.</label>
+      <div class="warn save-block" id="saveBlock"></div>
       <div class="row end">
         <button id="btnNew" class="ghost">Yeni nodül</button>
         <button id="btnSave" class="primary" disabled>Onayla ve kaydet</button>

@@ -100,9 +100,14 @@ def build_report(case: dict) -> str:
     if case.get("notes"):
         lines += ["", f"Radyolog notu: {case['notes']}"]
     ai = case.get("ai", {})
+    dices = [f"{VIEW_LABELS.get(k, k)} {a['ai_vs_final_dice']:.2f}"
+             for k, a in (ai.get("views") or {}).items()
+             if a and a.get("ai_vs_final_dice") is not None]
     lines += [
         "",
         f"Segmentasyon: {ai.get('summary', 'manuel')}",
+    ] + ([f"AI önerisi ile son kontur uyumu (Dice): {', '.join(dices)}"]
+         if dices else []) + [
         f"Onaylayan radyolog: {case.get('radiologist') or '-'}",
         "",
         "Bu çıktı araştırma amaçlı karar destek yazılımı tarafından "
@@ -113,7 +118,7 @@ def build_report(case: dict) -> str:
 
 def save_case(cases_dir: Path, case: dict, frames: dict) -> Path:
     """frames: view -> {"image": np.ndarray, "mask": np.ndarray|None,
-    "lines": [...]}"""
+    "ai_mask": np.ndarray|None, "lines": [...]}"""
     d = cases_dir / case["case_id"]
     d.mkdir(parents=True, exist_ok=False)
     for view, fr in frames.items():
@@ -121,6 +126,9 @@ def save_case(cases_dir: Path, case: dict, frames: dict) -> Path:
         if fr.get("mask") is not None:
             cv2.imwrite(str(d / f"{view}_mask.png"),
                         (fr["mask"] > 0).astype(np.uint8) * 255)
+        if fr.get("ai_mask") is not None:  # AI'ın düzeltilmemiş önerisi
+            cv2.imwrite(str(d / f"{view}_mask_ai.png"),
+                        (fr["ai_mask"] > 0).astype(np.uint8) * 255)
         cv2.imwrite(str(d / f"{view}_overlay.jpg"),
                     overlay(fr["image"], fr.get("mask"), fr.get("lines", [])),
                     [cv2.IMWRITE_JPEG_QUALITY, 92])

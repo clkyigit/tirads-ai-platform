@@ -25,7 +25,9 @@ const S = {
 VIEWS.forEach((v) => (S.views[v] = emptyView()));
 
 function emptyView() {
-  return { frameId: null, w: 0, h: 0, img: null, contour: null, ai: null, lines: {} };
+  // aiContour: AI'ın ilk önerisi; confirmed: radyolog onayı; hist/fut: geri al/yinele
+  return { frameId: null, w: 0, h: 0, img: null, contour: null, ai: null, lines: {},
+           aiContour: null, confirmed: false, aiDice: null, hist: [], fut: [] };
 }
 const cur = () => S.views[S.view];
 const mmpp = () => S.status?.calibration?.mm_per_px || null;
@@ -301,12 +303,16 @@ function draw() {
 
   // Kontur
   if (v.contour?.length) {
+    const pending = isPending(v);
     ctx.save();
     ctx.beginPath();
     v.contour.forEach((p, i) => { const q = toCv(p); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
     ctx.closePath();
-    ctx.fillStyle = "rgba(255,200,61,.14)"; ctx.fill();
-    ctx.strokeStyle = "#ffc83d"; ctx.lineWidth = 2 * dpr; ctx.stroke();
+    ctx.fillStyle = pending ? "rgba(54,179,224,.12)" : "rgba(255,200,61,.14)"; ctx.fill();
+    // Onay bekleyen AI önerisi kesikli mavi, onaylı kontur düz sarı
+    ctx.strokeStyle = pending ? "#4cc3f0" : "#ffc83d"; ctx.lineWidth = 2 * dpr;
+    if (pending) ctx.setLineDash([7 * dpr, 5 * dpr]);
+    ctx.stroke();
     ctx.restore();
   }
   // Kumpas çizgileri
@@ -343,6 +349,13 @@ function draw() {
     ctx.stroke();
     S.poly.forEach((p, i) => { const q = toCv(p); ctx.beginPath(); ctx.arc(q[0], q[1], (i ? 3 : 6) * dpr, 0, 7); i ? ctx.fill() : ctx.stroke(); });
   }
+  // Düzenleme fırçası (etki alanı)
+  if (S.tool === "edit" && S.mouse && !S.edit && v.contour) {
+    const q = toCv(S.mouse);
+    ctx.strokeStyle = "rgba(76,195,240,.75)"; ctx.setLineDash([3 * dpr, 3 * dpr]);
+    ctx.beginPath(); ctx.arc(q[0], q[1], S.brush * dpr, 0, 7); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   if (S.calibPts) {
     ctx.fillStyle = "#36b3e0";
     S.calibPts.forEach((p) => { const q = toCv(p); ctx.beginPath(); ctx.arc(q[0], q[1], 5 * dpr, 0, 7); ctx.fill(); });
@@ -355,7 +368,7 @@ function setTool(t) {
   S.tool = S.tool === t ? null : t;
   S.poly = null; S.drag = null; S.free = null; S.edit = null;
   if (S.tool !== "calib") S.calibPts = null;
-  if (S.tool === "edit" && !cur().contour) { toast("Düzenlenecek kontur yok."); S.tool = null; }
+  if ((S.tool === "edit" || S.tool === "splice") && !cur().contour) { toast("Düzenlenecek kontur yok."); S.tool = null; }
   document.querySelectorAll("#tools button[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === S.tool));
   const hints = {
     ai: "Nodülün içine tıklayın; model o noktadaki nodülü segmente eder.",
@@ -363,12 +376,15 @@ function setTool(t) {
     ap: "Ön-arka (AP) çapı çizin: tıklayıp sürükleyin.",
     length: "Longitudinal uzunluğu çizin: tıklayıp sürükleyin.",
     draw: "Basılı tutup sınırı çizin (bırakınca kapanır) ya da noktalarla tıklayıp ilk noktaya tıklayın / Enter. Esc iptal.",
-    edit: "Konturu tutup sürükleyin; yakın noktalar yumuşakça birlikte hareket eder.",
+    edit: "Konturu tutup sürükleyin; daire içindeki noktalar birlikte hareket eder. Fare tekerleği veya [ ] ile daireyi büyütüp küçültün.",
+    splice: "Konturun üzerinden başlayıp yeni sınırı çizin ve yine konturun üzerinde bitirin; aradaki kısım değiştirilir.",
     calib: "Derinlik skalasında iki çentiğe tıklayın.",
     roi: "Model için görüntü alanını sürükleyerek seçin (menü/yazılar dışarıda kalsın).",
     privacy: "Hasta bilgisi alanını sürükleyerek seçin; kayıt ve akışta siyaha boyanır.",
   };
   $("hint").textContent = S.tool ? hints[S.tool] : (cur().frameId ? "Bir araç seçin ya da canlıya dönün." : "Nodülü ekrana getirip Dondur'a basın.");
+  cv.style.cursor = S.tool === "edit" ? "none" : "crosshair";
+  renderContourBar();
   draw();
 }
 
@@ -382,26 +398,40 @@ function resample(c, step) {
   }
   return out;
 }
-const EDIT_RADIUS = 28;  // ekran pikseli
+S.brush = Math.min(120, Math.max(8, parseInt(load("brush") || "28", 10) || 28));  // ekran pikseli
+
+cv.addEventListener("wheel", (ev) => {
+  if (S.tool !== "edit") return;
+  ev.preventDefault();
+  setBrush(S.brush * (ev.deltaY < 0 ? 1.15 : 1 / 1.15));
+}, { passive: false });
+function setBrush(r) {
+  S.brush = Math.round(Math.min(120, Math.max(8, r)));
+  store("brush", S.brush);
+  draw();
+}
+cv.addEventListener("mouseleave", () => { S.mouse = null; draw(); });
 
 cv.addEventListener("mousedown", (ev) => {
   if (ev.button !== 0 || !S.tool) return;
   const p = toImg(ev);
   if (["width", "ap", "length"].includes(S.tool)) S.drag = { kind: "line", start: p, end: p };
   else if (["roi", "privacy"].includes(S.tool)) S.drag = { kind: "rect", start: p, end: p };
-  else if (S.tool === "draw" && !(S.poly && S.poly.length)) S.free = { pts: [p], moved: false };
+  else if ((S.tool === "draw" && !(S.poly && S.poly.length)) || S.tool === "splice") S.free = { pts: [p], moved: false };
   else if (S.tool === "edit" && cur().contour) {
     const dpr = T.dpr || 1, q = toCv(p);
     const pts = resample(cur().contour, 3);
     let best = -1, bd = Infinity;
     pts.forEach((c, i) => { const r = toCv(c), d = Math.hypot(r[0] - q[0], r[1] - q[1]); if (d < bd) { bd = d; best = i; } });
-    if (bd > EDIT_RADIUS * dpr) return;
+    if (bd > S.brush * dpr) return;
+    const before = snap(cur());   // geri al için düzenleme öncesi durum
     cur().contour = pts;
-    S.edit = { orig: pts.map((c) => c.slice()), grab: pts[best].slice(), start: p };
+    S.edit = { orig: pts.map((c) => c.slice()), grab: pts[best].slice(), start: p, before };
   }
 });
 cv.addEventListener("mousemove", (ev) => {
   const p = toImg(ev);
+  S.mouse = p;
   if (S.drag) { S.drag.end = p; draw(); }
   else if (S.free && (ev.buttons & 1)) {
     const last = S.free.pts[S.free.pts.length - 1];
@@ -413,7 +443,7 @@ cv.addEventListener("mousemove", (ev) => {
   }
   else if (S.edit && (ev.buttons & 1)) {
     const dx = p[0] - S.edit.start[0], dy = p[1] - S.edit.start[1];
-    const R = EDIT_RADIUS * (T.dpr || 1) / T.s, g = S.edit.grab;
+    const R = S.brush * (T.dpr || 1) / T.s, g = S.edit.grab;
     cur().contour = S.edit.orig.map((c) => {
       const w = Math.exp(-((c[0] - g[0]) ** 2 + (c[1] - g[1]) ** 2) / (R * R));
       return [c[0] + w * dx, c[1] + w * dy];
@@ -421,10 +451,19 @@ cv.addEventListener("mousemove", (ev) => {
     draw();
   }
   else if (S.poly) { S.poly.hover = p; draw(); }
+  else if (S.tool === "edit") draw();
 });
 window.addEventListener("mouseup", async (ev) => {
   if (S.free) {
     const f = S.free; S.free = null;
+    if (S.tool === "splice") {
+      S.poly = null; S.suppressClick = true;
+      if (!f.moved) { draw(); return; }
+      const res = spliceContour(cur().contour, f.pts, 14 * (T.dpr || 1) / T.s);
+      if (res.error) { draw(); return toast(res.error, true); }
+      await applyContour(res.contour.map((q) => q.map(Math.round)), "edit");
+      return;  // araç açık kalır: birden fazla bölge düzeltilebilir
+    }
     if (f.moved && f.pts.length >= 8) {
       S.suppressClick = true; S.poly = null;
       await applyContour(f.pts.map((q) => q.map(Math.round)), "manual");
@@ -433,8 +472,11 @@ window.addEventListener("mouseup", async (ev) => {
     return;
   }
   if (S.edit) {
+    const before = S.edit.before;
     S.edit = null;
-    await applyContour(cur().contour.map((q) => q.map(Math.round)), "edit");
+    const moved = cur().contour.some((c, i) => Math.hypot(c[0] - S_editOrig(i, before)[0], c[1] - S_editOrig(i, before)[1]) > 0.5);
+    if (!moved) { cur().contour = before.contour; draw(); return; }
+    await applyContour(cur().contour.map((q) => q.map(Math.round)), "edit", { before });
     return;
   }
   if (!S.drag) return;
@@ -500,16 +542,151 @@ async function finishPoly() {
   setTool(null);
 }
 
-async function applyContour(contour, how) {
+// ------------------------------------------------- kontur durumu / geçmiş
+const isPending = (v) => !!(v.contour && v.aiContour && !v.confirmed);
+const snap = (v) => ({ contour: v.contour, ai: v.ai, confirmed: v.confirmed, aiDice: v.aiDice });
+function pushHistory(v) {
+  v.hist.push(snap(v));
+  if (v.hist.length > 60) v.hist.shift();
+  v.fut = [];
+}
+
+// how: "manual" (sıfırdan çizim, radyoloğun kendi çizimi → onaylı)
+//      "edit"   (düzeltme; onay durumu korunur)
+//      "ai"     (AI önerisine geri dönüş)
+async function applyContour(contour, how, { history = true, confirmed, before } = {}) {
   const v = cur();
+  const prev = before || snap(v);
+  const conf = confirmed !== undefined ? confirmed : how === "manual" ? true : how === "ai" ? false : prev.confirmed;
   try {
-    const r = await api("/api/contour", { json: { frame_id: v.frameId, contour } });
-    v.contour = contour;
-    if (how === "manual") v.ai = { backend: "manuel", edited: true };
+    const r = await api("/api/contour", { json: { frame_id: v.frameId, contour, source: how, confirmed: conf } });
+    if (history) { v.hist.push(prev); if (v.hist.length > 60) v.hist.shift(); v.fut = []; }
+    // AI önerisine dönüşte aynı nesne korunur (sonraki geri almalarda tanınsın)
+    v.contour = how === "ai" && contour === v.aiContour ? v.aiContour : (r.contour || contour);
+    v.confirmed = conf;
+    v.aiDice = r.ai_dice ?? null;
+    if (how === "manual") v.ai = v.aiContour ? { ...v.ai, edited: true, redrawn: true } : { backend: "manuel", edited: true };
     else if (how === "edit") v.ai = v.ai ? { ...v.ai, edited: true } : { backend: "manuel", edited: true };
     autoLines(v, r.metrics_px);
-    renderAiInfo(); draw(); renderDims(); markDots();
+    afterContourChange();
+  } catch (e) { toast(e.message, true); v.contour = prev.contour; draw(); }
+}
+
+// Sürükleme başında konturun yeniden örneklenmiş hali (hareket var mı?)
+function S_editOrig(i, before) {
+  const o = S._editOrigCache && S._editOrigCache.src === before.contour ? S._editOrigCache.pts
+    : (S._editOrigCache = { src: before.contour, pts: resample(before.contour, 3) }).pts;
+  return o[i] || [Infinity, Infinity];
+}
+
+function afterContourChange() {
+  renderAiInfo(); draw(); renderDims(); markDots(); renderContourBar();
+}
+
+async function confirmContour() {
+  const v = cur();
+  if (!v.contour) return;
+  try {
+    await api("/api/contour/confirm", { json: { frame_id: v.frameId, confirmed: true } });
+    pushHistory(v);
+    v.confirmed = true;
+    setTool(null);
+    afterContourChange();
+    toast("Kontur onaylandı.");
   } catch (e) { toast(e.message, true); }
+}
+
+async function restore(state) {
+  const v = cur();
+  if (!state.contour) {
+    await api("/api/contour", { json: { frame_id: v.frameId, contour: [] } });
+    v.contour = null; v.confirmed = false; v.aiDice = null; v.ai = state.ai;
+    for (const k of Object.keys(v.lines)) if (v.lines[k].source === "auto") delete v.lines[k];
+    afterContourChange();
+    return;
+  }
+  const how = state.contour === v.aiContour ? "ai"
+    : (state.ai?.redrawn || state.ai?.backend === "manuel") ? "manual" : "edit";
+  await applyContour(state.contour, how, { history: false, confirmed: state.confirmed });
+  v.ai = state.ai;
+  afterContourChange();
+}
+
+async function undo() {
+  const v = cur();
+  if (!v.frameId || !v.hist.length) return toast("Geri alınacak işlem yok.");
+  const prev = v.hist.pop();
+  v.fut.push(snap(v));
+  await restore(prev);
+}
+async function redo() {
+  const v = cur();
+  if (!v.frameId || !v.fut.length) return toast("Yinelenecek işlem yok.");
+  const next = v.fut.pop();
+  v.hist.push(snap(v));
+  await restore(next);
+}
+
+async function deleteContour() {
+  const v = cur();
+  if (!v.contour) return;
+  pushHistory(v);
+  await restore({ contour: null, ai: v.ai });
+  toast("Kontur silindi (Ctrl+Z ile geri alabilirsiniz).");
+}
+
+// Kısmi düzeltme: konturun üzerinde başlayıp biten çizgi, iki uç arasındaki
+// kontur parçasının yerine geçer. Hangi parçanın değişeceği, çizgiye daha
+// yakın olan parçadır.
+function spliceContour(contour, stroke, tol) {
+  const C = resample(contour, 2);
+  const n = C.length;
+  const near = (p) => {
+    let bi = -1, bd = Infinity;
+    C.forEach((c, i) => { const d = Math.hypot(c[0] - p[0], c[1] - p[1]); if (d < bd) { bd = d; bi = i; } });
+    return [bi, bd];
+  };
+  const [i0, d0] = near(stroke[0]);
+  const [i1, d1] = near(stroke[stroke.length - 1]);
+  if (d0 > tol || d1 > tol) return { error: "Çizgiyi konturun üzerinde başlatıp yine konturun üzerinde bitirin." };
+  const S_ = stroke.map((p) => [p[0], p[1]]);
+  if (i0 === i1 || Math.min((i1 - i0 + n) % n, (i0 - i1 + n) % n) < 3) {
+    // Aynı noktada başlayıp biten çizgi: konturu o noktadan genişletir/daraltır
+    return { contour: [...C.slice(0, i0 + 1), ...S_, ...C.slice(i0 + 1)] };
+  }
+  const arc = (a, b) => { const out = []; for (let i = a; ; i = (i + 1) % n) { out.push(C[i]); if (i === b) break; } return out; };
+  const meanDist = (pts) => {
+    let t = 0;
+    for (const p of pts) { let m = Infinity; for (const q of S_) m = Math.min(m, Math.hypot(p[0] - q[0], p[1] - q[1])); t += m; }
+    return t / Math.max(1, pts.length);
+  };
+  const fwd = arc(i0, i1);   // i0 → i1 yönündeki parça
+  const bwd = arc(i1, i0);   // i1 → i0 yönündeki parça
+  // fwd değişirse: çizgi (i0→i1) + bwd'nin içi; bwd değişirse: fwd + ters çizgi
+  const replaceFwd = meanDist(fwd) <= meanDist(bwd);
+  const out = replaceFwd ? [...S_, ...bwd.slice(1, -1)] : [...fwd, ...S_.slice().reverse().slice(1, -1)];
+  if (out.length < 3) return { error: "Kontur düzeltilemedi; tekrar deneyin." };
+  return { contour: out };
+}
+
+// Görüntü üstündeki kontur eylem çubuğu
+function renderContourBar() {
+  const v = cur(), bar = $("contourBar");
+  const show = !!(v.frameId && v.contour);
+  bar.hidden = !show;
+  if (!show) return;
+  const pending = isPending(v);
+  bar.classList.toggle("pending", pending);
+  const st = $("cbState");
+  if (pending) st.textContent = v.ai?.edited ? "AI önerisi (düzeltildi) · onay bekliyor" : "AI önerisi · kontrol edip onaylayın";
+  else if (v.ai?.redrawn) st.textContent = "✓ Elle çizildi (AI önerisi yerine)";
+  else if (v.aiContour) st.textContent = v.ai?.edited ? "✓ Düzeltildi ve onaylandı" : "✓ AI önerisi onaylandı";
+  else st.textContent = "✓ Elle çizildi";
+  $("cbConfirm").hidden = !pending;
+  $("cbAi").hidden = !S.status?.model?.ready;
+  $("cbUndo").disabled = !v.hist.length;
+  $("cbRedo").disabled = !v.fut.length;
+  bar.querySelectorAll("[data-cb]").forEach((b) => b.classList.toggle("active", b.dataset.cb === S.tool));
 }
 
 function autoLines(v, m) {
@@ -529,10 +706,16 @@ async function runSegment(p) {
   try {
     const r = await api("/api/segment", { json: { frame_id: v.frameId, click: p.map(Math.round) } });
     if (r.empty) { toast(r.message); return; }
+    pushHistory(v);
     v.contour = r.contour;
+    v.aiContour = r.contour;       // geri al ile bu öneriye dönülebilir
+    v.confirmed = false;
+    v.aiDice = 1;
     v.ai = { backend: r.backend, confidence: r.confidence, ms: r.ms, edited: false };
     autoLines(v, r.metrics_px);
-    renderAiInfo(); draw(); renderDims(); markDots();
+    setTool("edit");               // doğrudan düzenlemeye hazır
+    afterContourChange();
+    $("hint").textContent = "AI konturu çizdi. Kontrol edin: gerekirse sürükleyerek düzeltin (E), bir bölümünü yeniden çizin (K) ya da baştan çizin (D). Uygunsa Enter ile onaylayın.";
   } catch (e) { toast(e.message, true); }
   finally { viewerMsg(""); }
 }
@@ -543,7 +726,10 @@ function renderAiInfo() {
     if (!a) return null;
     const name = k === "transverse" ? "Transvers" : "Longitudinal";
     if (a.backend === "manuel") return `${name}: elle çizildi`;
-    return `${name}: ${a.backend === "demo" ? "DEMO" : "UNet++"} · güven ${(a.confidence * 100).toFixed(0)}% · ${Math.round(a.ms)} ms${a.edited ? " · düzeltildi" : ""}`;
+    const v = S.views[k];
+    const fit = a.edited && v.aiDice != null ? ` · AI ile uyum ${(v.aiDice * 100).toFixed(0)}%` : "";
+    const st = isPending(v) ? " · onay bekliyor" : v.contour ? " · onaylı" : "";
+    return `${name}: ${a.backend === "demo" ? "DEMO" : "UNet++"} · güven ${(a.confidence * 100).toFixed(0)}%${a.redrawn ? " · elle yeniden çizildi" : a.edited ? " · düzeltildi" : ""}${fit}${st}`;
   }).filter(Boolean);
   $("aiInfo").textContent = parts.join("  |  ");
 }
@@ -582,9 +768,9 @@ function clearViewData(view, dropFrame) {
   const v = S.views[view];
   for (const k of Object.keys(v.lines)) S.manualDims[k] = null;
   if (dropFrame) S.views[view] = emptyView();
-  else { v.contour = null; v.lines = {}; v.ai = null; }
+  else { pushHistory(v); v.contour = null; v.lines = {}; v.confirmed = false; v.aiDice = null; }
   if (v.frameId && !dropFrame) api("/api/contour", { json: { frame_id: v.frameId, contour: [] } }).catch(() => {});
-  renderAiInfo(); renderDims(); markDots(); draw();
+  renderAiInfo(); renderDims(); markDots(); draw(); renderContourBar();
 }
 
 function switchView(view) {
@@ -595,6 +781,7 @@ function switchView(view) {
   setLiveMode(!frozen);
   fit();
   setTool(frozen && S.tool ? S.tool : null);
+  renderContourBar();
 }
 
 async function uploadFile(file) {
@@ -615,7 +802,10 @@ async function uploadFile(file) {
 function updateSaveEnabled() {
   const s = S.lastScore?.score;
   const anyView = VIEWS.some((k) => S.views[k].frameId);
-  $("btnSave").disabled = !(anyView && s?.level && $("approved").checked && $("radiologist").value.trim());
+  const pending = VIEWS.filter((k) => isPending(S.views[k]));
+  $("btnSave").disabled = !(anyView && s?.level && $("approved").checked && $("radiologist").value.trim() && !pending.length);
+  $("saveBlock").textContent = pending.length
+    ? `${pending.map((k) => VIEW_TR[k]).join(" ve ")} kesitindeki AI konturu onay bekliyor.` : "";
 }
 
 async function save() {
@@ -921,6 +1111,12 @@ async function init() {
   for (const k of ["width", "ap", "length"]) $(LINE_INPUT[k]).addEventListener("input", () => onDimInput(k));
   ["approved", "radiologist"].forEach((id) => $(id).addEventListener("input", updateSaveEnabled));
   $("btnSave").onclick = save;
+  $("cbConfirm").onclick = confirmContour;
+  $("cbUndo").onclick = undo;
+  $("cbRedo").onclick = redo;
+  $("cbDelete").onclick = deleteContour;
+  $("cbAi").onclick = () => setTool("ai");
+  $("contourBar").querySelectorAll("[data-cb]").forEach((b) => (b.onclick = () => setTool(b.dataset.cb)));
   $("btnNew").onclick = () => confirm("Mevcut değerlendirme temizlensin mi?") && resetAll();
   live.onerror = () => setTimeout(() => { if (!cur().frameId) live.src = "/api/stream?" + Date.now(); }, 2000);
 
@@ -928,9 +1124,18 @@ async function init() {
   window.addEventListener("keydown", (e) => {
     // Metin alanlarında kısayol yok; radyo/onay kutularında kısayollar çalışır
     if (e.target.matches('input:not([type="radio"]):not([type="checkbox"]), textarea, select') ||
-        document.querySelector("dialog[open]") || e.ctrlKey || e.metaKey || e.altKey) return;
+        document.querySelector("dialog[open]")) return;
     const k = e.key.toLowerCase();
-    const map = { a: "ai", w: "width", h: "ap", l: "length", d: "draw", e: "edit" };
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); redo(); }
+      return;
+    }
+    if (e.altKey) return;
+    const map = { a: "ai", w: "width", h: "ap", l: "length", d: "draw", e: "edit", k: "splice" };
+    if (k === "enter" && S.tool !== "draw" && isPending(cur())) { e.preventDefault(); return confirmContour(); }
+    if ((k === "delete" || k === "backspace") && cur().contour) { e.preventDefault(); return deleteContour(); }
+    if ((k === "[" || k === "]") && S.tool === "edit") return setBrush(S.brush * (k === "]" ? 1.15 : 1 / 1.15));
     if (k === "s" && S.mode === "annot") { e.preventDefault(); return saveAnnotation(); }
     if (e.code === "Space") { e.preventDefault(); e.target.blur?.(); freezeToggle(); }
     else if (k === "1") switchView("transverse");

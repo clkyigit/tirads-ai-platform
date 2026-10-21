@@ -74,6 +74,7 @@ class State:
         img = apply_privacy(img, self.cfg.get()["privacy_masks"])
         with self.frames_lock:
             self.frames[fid] = {"image": img, "mask": None, "ai_mask": None,
+                                "confirmed": False,
                                 "origin": origin, "ai": None,
                                 "ts": time.time()}
             while len(self.frames) > MAX_FRAMES:
@@ -91,6 +92,12 @@ class State:
     def reload_model(self):
         with self.model_lock:
             self.segmenter = Segmenter(self.cfg.get()["model"], ROOT)
+
+
+def _dice(a: np.ndarray, b: np.ndarray) -> float:
+    a, b = a > 0, b > 0
+    s = int(a.sum() + b.sum())
+    return 1.0 if s == 0 else float(2 * (a & b).sum() / s)
 
 
 def _err(msg: str, code: int = 400):
@@ -251,6 +258,7 @@ def create_app(config_path: Path | None = None, start_capture=True,
         contour = measure.mask_to_contour(r["mask"])
         fr["mask"] = r["mask"]
         fr["ai_mask"] = r["mask"].copy()  # düzeltilmemiş hali (veri döngüsü)
+        fr["confirmed"] = False           # radyolog onayı bekleniyor
         fr["ai"] = {"backend": seg.backend, "confidence": r["confidence"],
                     "edited": False}
         mmpp = st.cfg.get()["calibration"]["mm_per_px"]
@@ -267,21 +275,60 @@ def create_app(config_path: Path | None = None, start_capture=True,
         except KeyError as e:
             return _err(str(e), 404)
         contour = body.get("contour") or []
+        # source: "manual" (sıfırdan çizim) | "edit" (düzeltme) | "ai" (AI
+        # önerisine geri dönüş, ör. geri al) ; confirmed: radyolog onayı
+        source = body.get("source", "edit")
         if len(contour) < 3:
             fr["mask"] = None
+            fr["confirmed"] = False
+            if body.get("drop_ai"):
+                fr["ai"], fr["ai_mask"] = None, None
             return JSONResponse({"cleared": True})
         H, W = fr["image"].shape[:2]
         mask = np.zeros((H, W), np.uint8)
         cv2.fillPoly(mask, [np.asarray(contour, np.int32).reshape(-1, 1, 2)], 1)
+        if not mask.any():
+            return _err("Kontur alanı boş.")
+        # Kendini kesen çizimler (kısmi düzeltme) maskeden temiz konturla
+        # normalize edilir; ölçümler bu konturdan yapılır.
+        clean = measure.mask_to_contour(mask)
+        if len(clean) >= 3:
+            mask = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(mask, [np.asarray(clean, np.int32).reshape(-1, 1, 2)], 1)
+            contour = clean
         fr["mask"] = mask
-        prev = fr.get("ai") or {}
-        fr["ai"] = {**prev, "edited": True} if prev else {"backend": "manuel",
-                                                          "edited": True}
+        if source == "manual":
+            # Radyoloğun sıfırdan çizimi. AI önerisi varsa silinmez: geri
+            # alınabilsin ve AI'ın ıskaladığı vakalar veri setinde görünsün.
+            if fr.get("ai_mask") is not None:
+                fr["ai"] = {**(fr.get("ai") or {}), "edited": True,
+                            "redrawn": True}
+            else:
+                fr["ai"] = {"backend": "manuel", "edited": True}
+        else:
+            prev = fr.get("ai") or {"backend": "manuel"}
+            fr["ai"] = {**prev, "edited": source != "ai"}
+        fr["confirmed"] = bool(body.get("confirmed"))
         mmpp = st.cfg.get()["calibration"]["mm_per_px"]
         try:
-            return JSONResponse(_metrics_payload(contour, mmpp))
+            out = _metrics_payload(contour, mmpp)
         except ValueError as e:
             return _err(str(e))
+        out["confirmed"] = fr["confirmed"]
+        if fr.get("ai_mask") is not None:
+            out["ai_dice"] = _dice(fr["ai_mask"], mask)
+        return JSONResponse(out)
+
+    async def confirm_contour(req: Request):
+        body = await req.json()
+        try:
+            fr = st.get_frame(body.get("frame_id", ""))
+        except KeyError as e:
+            return _err(str(e), 404)
+        if fr.get("mask") is None:
+            return _err("Onaylanacak kontur yok.")
+        fr["confirmed"] = bool(body.get("confirmed", True))
+        return JSONResponse({"confirmed": fr["confirmed"]})
 
     async def score(req: Request):
         body = await req.json()
@@ -381,9 +428,18 @@ def create_app(config_path: Path | None = None, start_capture=True,
                 fr = st.get_frame(v["frame_id"])
             except KeyError as e:
                 return _err(f"{storage.VIEW_LABELS[view]}: {e}", 404)
+            if fr.get("mask") is not None and fr.get("ai_mask") is not None \
+                    and not fr.get("confirmed"):
+                return _err(f"{storage.VIEW_LABELS[view]}: AI konturu henüz "
+                            "onaylanmadı. Konturu kontrol edip 'Onayla'ya basın.")
             frames[view] = {"image": fr["image"], "mask": fr["mask"],
+                            "ai_mask": fr.get("ai_mask"),
                             "lines": v.get("lines") or []}
-            ai[view] = fr.get("ai")
+            a = dict(fr.get("ai") or {}) or None
+            if a is not None and fr.get("ai_mask") is not None \
+                    and fr.get("mask") is not None:
+                a["ai_vs_final_dice"] = _dice(fr["ai_mask"], fr["mask"])
+            ai[view] = a
         if not frames:
             return _err("En az bir görüntü (transvers/longitudinal) gerekli.")
         features = b.get("features") or {}
@@ -396,11 +452,16 @@ def create_app(config_path: Path | None = None, start_capture=True,
         dims = [float(x) for x in dims if x not in (None, "")]
         meas["max_mm"] = max(dims) if dims else None
         rec = tirads.recommendation(s["level"], meas["max_mm"])
-        used = [f"{storage.VIEW_LABELS[k]}: "
-                + (("elle düzeltilmiş " if a.get("edited") else "")
-                   + (a.get("backend") or "manuel")) if a else
-                f"{storage.VIEW_LABELS[k]}: manuel"
-                for k, a in ai.items()]
+        def describe(k, a):
+            name = storage.VIEW_LABELS[k]
+            if not a or a.get("backend") in (None, "manuel"):
+                return f"{name}: elle çizildi"
+            if a.get("redrawn"):
+                return f"{name}: AI önerisi ({a['backend']}) yerine elle çizildi"
+            if a.get("edited"):
+                return f"{name}: AI ({a['backend']}), radyolog düzeltti ve onayladı"
+            return f"{name}: AI ({a['backend']}), değiştirilmeden onaylandı"
+        used = [describe(k, a) for k, a in ai.items()]
         case = {
             "case_id": storage.new_case_id(b.get("study_no", "")),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -453,6 +514,7 @@ def create_app(config_path: Path | None = None, start_capture=True,
                         "fourcc": cap["source"].get("fourcc"),
                         "type": cap["source"].get("type")},
             "ai": fr.get("ai"),
+            "contour_confirmed": True,   # etiket kaydı = radyolog onayı
             "features": feats,
             "tirads": ({"total": sc["total"], "level": sc["level"]}
                        if sc and sc.get("level") else None),
@@ -513,6 +575,7 @@ def create_app(config_path: Path | None = None, start_capture=True,
         Route("/api/frame/{fid}.png", frame_png),
         Route("/api/segment", segment, methods=["POST"]),
         Route("/api/contour", set_contour, methods=["POST"]),
+        Route("/api/contour/confirm", confirm_contour, methods=["POST"]),
         Route("/api/score", score, methods=["POST"]),
         Route("/api/config", config_get),
         Route("/api/config", config_set, methods=["POST"]),

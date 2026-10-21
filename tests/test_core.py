@@ -174,11 +174,18 @@ class TestApi(unittest.TestCase):
                 "radiologist": "Test", "approved": False}
         self.assertEqual(c.post("/api/cases", json=body).status_code, 400)
         body["approved"] = True
+        # AI konturu onaylanmadan kayıt yapılamaz
+        r = c.post("/api/cases", json=body)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("onaylanmadı", r.json()["error"])
+        self.assertTrue(c.post("/api/contour/confirm",
+                               json={"frame_id": fr["frame_id"]}).json()["confirmed"])
         sv = c.post("/api/cases", json=body).json()
         self.assertIn("case_id", sv)
+        self.assertIn("Dice", sv["report"])
         self.assertIn("TR4", sv["report"])
         d = Path(sv["path"])
-        for f in ("transverse.png", "transverse_mask.png",
+        for f in ("transverse.png", "transverse_mask.png", "transverse_mask_ai.png",
                   "transverse_overlay.jpg", "case.json", "report.txt"):
             self.assertTrue((d / f).exists(), f)
         lst = c.get("/api/cases").json()["cases"]
@@ -200,6 +207,52 @@ class TestApi(unittest.TestCase):
         self.assertAlmostEqual(r["metrics_px"]["height_px"], 71, delta=1)
         self.assertEqual(c.post("/api/upload", content=b"xx").status_code, 400)
 
+
+    def test_ai_contour_review_flow(self):
+        """AI önerisi → düzelt → onay; elle çizim → AI bırakılır."""
+        c = self.c
+        fr = c.post("/api/freeze").json()
+        fid = fr["frame_id"]
+        seg = c.post("/api/segment", json={"frame_id": fid, "click": [600, 300]}).json()
+        ai_contour = seg["contour"]
+        # Düzeltme (genişlet) → hâlâ onaysız, AI uyumu < 1
+        cnt = np.array(ai_contour, float)
+        ctr = cnt.mean(0)
+        bigger = ((cnt - ctr) * 1.1 + ctr).round().astype(int).tolist()
+        r = c.post("/api/contour", json={"frame_id": fid, "contour": bigger,
+                                         "source": "edit", "confirmed": False}).json()
+        self.assertFalse(r["confirmed"])
+        self.assertLess(r["ai_dice"], 0.99)
+        self.assertGreater(r["metrics_px"]["width_px"],
+                           seg["metrics_px"]["width_px"])
+        # Geri al: AI önerisine dönüş → uyum ~1
+        r = c.post("/api/contour", json={"frame_id": fid, "contour": ai_contour,
+                                         "source": "ai", "confirmed": False}).json()
+        self.assertGreater(r["ai_dice"], 0.97)
+        # Kendini kesen (kısmi düzeltme) kontur temizlenir
+        loop = ai_contour[: len(ai_contour) // 2] + [[620, 320], [560, 280]] + \
+            ai_contour[len(ai_contour) // 2:]
+        r = c.post("/api/contour", json={"frame_id": fid, "contour": loop,
+                                         "source": "edit", "confirmed": True}).json()
+        self.assertTrue(r["confirmed"])
+        self.assertGreaterEqual(len(r["contour"]), 3)
+        # Sıfırdan elle çizim: AI önerisi bırakılır, onaylı sayılır
+        sq = [[500, 250], [700, 250], [700, 380], [500, 380]]
+        r = c.post("/api/contour", json={"frame_id": fid, "contour": sq,
+                                         "source": "manual", "confirmed": True}).json()
+        self.assertLess(r["ai_dice"], 0.95)   # AI önerisi saklanır
+        st = self.app.state.st.get_frame(fid)
+        self.assertIsNotNone(st["ai_mask"])
+        self.assertTrue(st["ai"]["redrawn"])
+        # Hiç AI kullanılmamış karede elle çizim = manuel
+        fid2 = c.post("/api/freeze").json()["frame_id"]
+        r = c.post("/api/contour", json={"frame_id": fid2, "contour": sq,
+                                         "source": "manual", "confirmed": True}).json()
+        self.assertNotIn("ai_dice", r)
+        self.assertEqual(self.app.state.st.get_frame(fid2)["ai"]["backend"], "manuel")
+        # Onay kaldırılırsa (yeni AI önerisi) kayıt engellenir
+        c.post("/api/segment", json={"frame_id": fid, "click": [600, 300]})
+        self.assertFalse(self.app.state.st.get_frame(fid)["confirmed"])
 
 if __name__ == "__main__":
     unittest.main()
