@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import logging
 import secrets
@@ -23,7 +24,7 @@ from starlette.responses import (FileResponse, JSONResponse, Response,
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import dataset, measure, storage, tirads
+from . import biopsy, dataset, measure, storage, tirads
 from . import devices as devmod
 from .capture import CaptureManager
 from .config import ROOT, Config
@@ -60,6 +61,7 @@ class State:
             c["source"]["type"] = "demo"
             c["model"]["backend"] = "demo"
         self.segmenter = Segmenter(c["model"], ROOT)
+        self.biopsy = biopsy.BiopsyTracker(self.capture, self.cfg.get)
         if start_capture:
             self.capture.start(c["source"])
 
@@ -564,6 +566,75 @@ def create_app(config_path: Path | None = None, start_capture=True,
         summary["path"] = str(out)
         return JSONResponse(summary)
 
+    # ------------------------------------------------------- biyopsi rehberi
+    async def biopsy_start(_):
+        st.capture.set_demo_needle(True)
+        st.biopsy.start()
+        return JSONResponse({"active": True, "plan": st.biopsy.plan})
+
+    async def biopsy_stop(_):
+        st.biopsy.stop()
+        st.capture.set_demo_needle(False)
+        return JSONResponse({"active": False})
+
+    async def biopsy_plan(req: Request):
+        b = await req.json()
+
+        def pt(v):
+            if v is None:
+                return None
+            if not (isinstance(v, (list, tuple)) and len(v) == 2):
+                raise ValueError("Nokta [x, y] olmalı")
+            return [float(v[0]), float(v[1])]
+        try:
+            plan = st.biopsy.set_plan(
+                target=pt(b.get("target")),
+                entry=(pt(b["entry"]) if b.get("entry") else []) if "entry" in b else None,
+                radius_mm=b.get("radius_mm"), track_target=b.get("track_target"),
+                clear=bool(b.get("clear")))
+        except (ValueError, TypeError) as e:
+            return _err(str(e))
+        return JSONResponse({"plan": plan})
+
+    async def biopsy_state(_):
+        return JSONResponse(st.biopsy.snapshot())
+
+    async def biopsy_events(req: Request):
+        """Sunucu olayları (SSE): her işlenen karede rehber durumu."""
+        async def gen():
+            last = -1
+            yield "retry: 1000\n\n"
+            while True:
+                if await req.is_disconnected():
+                    break
+                v = st.biopsy.version
+                if v == last:
+                    await asyncio.sleep(0.015)
+                    continue
+                last = v
+                yield "data: " + json.dumps(st.biopsy.snapshot()) + "\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store",
+                                          "X-Accel-Buffering": "no"})
+
+    async def biopsy_snapshot(req: Request):
+        b = await req.json() if (await req.body()) else {}
+        _, frame = st.capture.latest()
+        if frame is None:
+            return _err("Görüntü yok.", 409)
+        state = st.biopsy.snapshot()
+        if not state.get("active"):
+            return _err("Biyopsi takibi kapalı.", 409)
+        img = apply_privacy(frame, st.cfg.get()["privacy_masks"])
+        meta = {"study_no": (b.get("study_no") or "").strip(),
+                "note": (b.get("note") or "").strip(),
+                "operator": (b.get("operator") or "").strip(),
+                "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "software": "tirads-ai-platform (araştırma amaçlı)"}
+        d = await run_in_threadpool(biopsy.save_snapshot,
+                                    st.cfg.data_dir() / "biopsy", img, state, meta)
+        return JSONResponse({"path": str(d), "name": d.name})
+
     routes = [
         Route("/", index),
         Route("/api/status", status),
@@ -585,6 +656,12 @@ def create_app(config_path: Path | None = None, start_capture=True,
         Route("/api/cases", case_save, methods=["POST"]),
         Route("/api/cases/{cid}/report", case_get),
         Route("/api/annotations", annotation_save, methods=["POST"]),
+        Route("/api/biopsy/start", biopsy_start, methods=["POST"]),
+        Route("/api/biopsy/stop", biopsy_stop, methods=["POST"]),
+        Route("/api/biopsy/plan", biopsy_plan, methods=["POST"]),
+        Route("/api/biopsy/state", biopsy_state),
+        Route("/api/biopsy/events", biopsy_events),
+        Route("/api/biopsy/snapshot", biopsy_snapshot, methods=["POST"]),
         Route("/api/dataset", dataset_stats),
         Route("/api/dataset/delete", dataset_delete, methods=["POST"]),
         Route("/api/dataset/export", dataset_export, methods=["POST"]),
@@ -594,6 +671,7 @@ def create_app(config_path: Path | None = None, start_capture=True,
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         yield
+        st.biopsy.stop()
         st.capture.stop()
 
     app = Starlette(routes=routes, lifespan=lifespan)

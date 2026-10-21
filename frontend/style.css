@@ -191,8 +191,11 @@ dialog h3 { margin: 0 0 8px; font-size: 14px; }
 .mode-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .mode-switch button { border: 0; border-radius: 0; background: transparent; }
 .mode-switch button.active { background: var(--accent); color: #031520; }
-body.mode-annot .clinical-only { display: none !important; }
+body.mode-annot .clinical-only, body.mode-biopsy .clinical-only { display: none !important; }
 body:not(.mode-annot) .annot-only { display: none !important; }
+body:not(.mode-biopsy) .biopsy-only { display: none !important; }
+body.mode-biopsy .not-biopsy, body.mode-biopsy .contour-bar { display: none !important; }
+body.mode-biopsy .research-banner { color: #ffb4ae; background: #2a1414; border-color: #4a2020; }
 body.mode-annot .research-banner { color: var(--accent); background: #0c1f29; border-color: #163a4a; }
 .ds-stats { font-size: 12.5px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
 .ds-stats b { color: var(--text); }
@@ -250,3 +253,30 @@ body.mode-annot .research-banner { color: var(--accent); background: #0c1f29; bo
 .save-block { font-size: 12.5px; margin: -2px 0 8px; }
 .save-block:empty { display: none; }
 @media (max-width: 1000px) { .contour-bar { max-width: calc(100% - 16px); top: 34px; } }
+
+/* Biyopsi modu */
+#ov { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: auto; }
+#ov.picking { cursor: crosshair; }
+.bx-hint {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 3;
+  background: rgba(13,17,23,.92); border: 1px solid #2a6f8c; color: #bfe9fb; border-radius: 8px;
+  padding: 7px 14px; font-size: 14px; pointer-events: none; text-align: center; max-width: 90%;
+}
+.bx-status {
+  font-size: 19px; font-weight: 700; padding: 12px 14px; border-radius: 8px; margin-bottom: 8px;
+  background: var(--bg3); color: var(--muted); border-left: 5px solid var(--line);
+}
+.bx-status[data-s="tracking"] { color: #7fd6f7; border-left-color: #36b3e0; }
+.bx-status[data-s="on_track"] { color: #7ee787; background: #10281a; border-left-color: var(--ok); }
+.bx-status[data-s="in_target"] { color: #0d1117; background: #3fb950; border-left-color: #7ee787; }
+.bx-status[data-s="off_track"] { color: #f2cc60; background: #33270e; border-left-color: var(--warn); }
+.bx-status[data-s="passed"] { color: #ffb4ae; background: #3a1513; border-left-color: var(--bad); }
+.bx-warn { font-size: 12.5px; color: var(--warn); margin: -2px 0 8px; }
+.bx-warn:empty { display: none; }
+.bx-metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+.bx-metrics div { background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.bx-metrics span { display: block; font-size: 11.5px; color: var(--muted); }
+.bx-metrics b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.bx-plan { margin-bottom: 8px; }
+.bx-plan button.active { background: var(--accent); color: #031520; }
+.bx-note { font-size: 11.5px; margin: 8px 0 0; }

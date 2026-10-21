@@ -18,6 +18,7 @@
   <div class="mode-switch" role="group" aria-label="Çalışma modu">
     <button id="modeClinical" class="active">Klinik</button>
     <button id="modeAnnot">Etiketleme</button>
+    <button id="modeBiopsy">Biyopsi</button>
   </div>
   <div class="top-actions">
     <button id="btnCases" class="ghost clinical-only">Vakalar</button>
@@ -25,7 +26,7 @@
   </div>
 </header>
 
-<div class="research-banner"><span class="clinical-only">Araştırma amaçlı karar destek yazılımıdır. Tüm ölçüm ve kategoriler radyolog tarafından onaylanmalıdır.</span><span class="annot-only">Etiketleme modu: kayıtlar eğitim veri setine gider. Hasta adı değil, takma kod kullanın.</span></div>
+<div class="research-banner"><span class="clinical-only">Araştırma amaçlı karar destek yazılımıdır. Tüm ölçüm ve kategoriler radyolog tarafından onaylanmalıdır.</span><span class="annot-only">Etiketleme modu: kayıtlar eğitim veri setine gider. Hasta adı değil, takma kod kullanın.</span><span class="biopsy-only">Biyopsi rehberi araştırma amaçlıdır; iğneyi her zaman görüntüde gözle takip edin.</span></div>
 
 <main class="layout">
   <section class="viewer-col">
@@ -50,6 +51,8 @@
         <button id="cbRedo" class="ghost" title="Yinele (Ctrl+Y)" aria-label="Yinele">&#8631;</button>
         <button id="cbDelete" class="ghost" title="Konturu sil (Del)">Sil</button>
       </div>
+      <canvas id="ov" class="biopsy-only"></canvas>
+      <div class="bx-hint biopsy-only" id="bxHint" hidden></div>
       <div class="viewer-msg" id="viewerMsg"></div>
       <div class="viewer-state" id="viewerState" hidden>
         <div class="vs-icon" id="vsIcon"></div>
@@ -58,7 +61,7 @@
       </div>
     </div>
 
-    <div class="toolbar">
+    <div class="toolbar not-biopsy">
       <div class="group">
         <button id="btnFreeze" class="primary">Dondur <kbd>Space</kbd></button>
         <label class="btn ghost" for="fileInput">Görüntü yükle</label>
@@ -75,11 +78,38 @@
         <button id="btnClearView" class="ghost" title="Bu görünümdeki kontur ve ölçümleri sil">Temizle</button>
       </div>
     </div>
-    <div class="hint" id="hint">Nodülü ekrana getirip <b>Dondur</b>'a basın.</div>
+    <div class="hint not-biopsy" id="hint">Nodülü ekrana getirip <b>Dondur</b>'a basın.</div>
   </section>
 
   <aside class="panel">
-    <div class="card">
+    <div class="card biopsy-only bx-card">
+      <h2>Biyopsi rehberi</h2>
+      <div class="bx-status" id="bxStatus" data-s="searching">İğne aranıyor</div>
+      <div class="bx-warn" id="bxWarn"></div>
+      <div class="bx-metrics">
+        <div><span>Uç – hedef</span><b id="bxTipT">–</b></div>
+        <div><span>Tahmini sapma</span><b id="bxMiss">–</b></div>
+        <div><span>Kalan yol</span><b id="bxRemain">–</b></div>
+        <div><span>İğne açısı</span><b id="bxAngle">–</b></div>
+        <div><span>Plan farkı</span><b id="bxAngDiff">–</b></div>
+        <div><span>Uç derinliği</span><b id="bxDepth">–</b></div>
+      </div>
+      <div class="row bx-plan">
+        <button id="bxPickTarget" type="button">Hedefi seç <kbd>T</kbd></button>
+        <button id="bxPickEntry" type="button">Giriş noktası <kbd>G</kbd></button>
+        <button id="bxClear" type="button" class="ghost">Planı temizle</button>
+      </div>
+      <div class="grid2">
+        <label>Hedef yarıçapı (mm)<input id="bxRadius" type="number" min="1" max="30" step="0.5" value="5"></label>
+        <label>Çalışma no<input id="bxStudy" placeholder="Hasta adı girmeyin"></label>
+      </div>
+      <label class="check"><input type="checkbox" id="bxTrack" checked> Hedef dokuyla birlikte hareket etsin (solunum, prob)</label>
+      <div class="row end"><button id="bxSnap" class="primary" type="button">İğne konumunu kaydet <kbd>F</kbd></button></div>
+      <div class="muted" id="bxPerf"></div>
+      <p class="muted bx-note">İğne, görüntü işlemeyle (model olmadan) algılanır; gecikmeli ya da hatalı olabilir. Rehber yalnızca yardımcıdır, iğneyi her zaman görüntüde gözle takip edin.</p>
+    </div>
+
+    <div class="card not-biopsy">
       <h2>Boyutlar <small id="calWarn" class="warn" hidden>kalibrasyon yok</small></h2>
       <div class="dims">
         <label>Transvers genişlik<input type="number" step="0.1" min="0" id="mWidth" placeholder="mm"></label>
@@ -90,7 +120,7 @@
       <div class="ai-info" id="aiInfo"></div>
     </div>
 
-    <div class="card">
+    <div class="card not-biopsy">
       <h2>ACR TI-RADS</h2>
       <form id="tiradsForm" autocomplete="off"></form>
     </div>

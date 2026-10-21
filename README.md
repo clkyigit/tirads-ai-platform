@@ -88,8 +88,42 @@ Kayıtta AI'ın ilk konturu (`*_mask_ai.png`) ve radyoloğun son konturu (`*_mas
 | Enter | AI konturunu onayla |
 | Ctrl+Z / Ctrl+Y | Geri al / Yinele |
 | Del | Konturu sil |
+| T / G | Biyopsi: hedefi / giriş noktasını seç |
+| F | Biyopsi: iğne konumunu kaydet |
 | S | Etiketi kaydet (etiketleme modunda) |
 | Esc | Aracı bırak |
+
+## Biyopsi rehberi (canlı iğne takibi)
+
+Üst menüden **Biyopsi** moduna geçin. Canlı USG görüntüsünün üzerine bir rehber katmanı çizilir; kayıt dışında tüm işlemler tarayıcıda, canlı görüntü üzerinde yapılır.
+
+1. **Hedefi seçin (T):** nodülde iğnenin ulaşmasını istediğiniz noktaya tıklayın. Hedef, görüntü parçasıyla takip edilir; solunum ve hafif prob hareketinde nodülle birlikte kayar. İğne hedefe yaklaşınca bu takip dondurulur, çünkü parlak iğne takibi yanıltır.
+2. **Giriş noktasını seçin (G):** iğnenin görüntüye gireceği yere (prob kenarı) tıklayın. Bu adım isteğe bağlıdır (Esc ile atlanır), ama algılamayı belirgin şekilde güçlendirir. Planlanan yol kesikli mavi çizgiyle, hedefe kalan santimetre işaretleriyle ve hedef yarıçapı genişliğinde bir koridorla gösterilir.
+3. **İğneyi ilerletin.** İğne otomatik algılanır; uç noktası ve iğne bu açıyla devam ederse izleyeceği yol (kesikli çizgi) gösterilir. Paneldeki durum:
+   - **Rotada** (yeşil): tahmini yol hedef dairesinden geçiyor; hedefe kalan mesafe yazılır.
+   - **Sapma var** (turuncu): tahmini yol hedefi kaç mm ıskalıyor ve hedef iğne hattının üstünde mi, altında mı.
+   - **Uç hedefte** (parlak yeşil): uç, hedef dairesinin içinde.
+   - **Uç hedefi geçti** (kırmızı).
+   - Ayrıca: uç–hedef mesafesi, kalan yol, iğne açısı, plana göre açı farkı ve uç derinliği.
+4. **İğne konumunu kaydet (F):** o anki görüntü, rehber çizimi ve ölçümler `data/biopsy/<tarih>/` altına kaydedilir (`frame.png`, `overlay.jpg`, `state.json`). Belgeleme için kullanılabilir.
+
+Nasıl çalışır: Eğitilmiş bir model gerekmez. İğne, görüntüdeki ince, parlak, eğik çizgi olarak bulunur (arka plan çıkarma, Hough, çizgi uydurma). Aşağıdaki ön bilgiler kullanılır:
+- Planlanan yol.
+- Önceki karedeki konum.
+- İlerleyen uçtaki hareket.
+- Görüntüyü iki yandan kesen fasya ve kapsül benzeri çizgilerin elenmesi.
+
+Uç, çizgi boyunca parlaklık profilinden belirlenir. Kare başına işlem yaklaşık 10–30 ms sürer.
+
+Sınırlar:
+- Yalnızca **in-plane** teknikte çalışır; out-of-plane iğne yalnızca bir nokta olarak görünür.
+- Çok soluk iğnelerde, iğne görüntü düzleminden çıktığında ya da güçlü artefaktlarda algılama kaybolabilir veya gecikebilir.
+- Uç, kapsül veya fasyaya değdiği anda birkaç mm hatalı görünebilir.
+- Rehber yalnızca yardımcıdır; **iğneyi her zaman görüntüde gözle takip edin.**
+- Kalibrasyon yoksa mesafeler piksel cinsinden gösterilir.
+- Sentetik görüntülerde test edilmiştir; gerçek iğne görüntüleriyle doğrulanmadan klinik kararda kullanılmamalıdır.
+
+İleride gerçek iğne görüntüleri toplandığında bir iğne segmentasyon modeli eğitilip bu algılayıcının yerine konulabilir.
 
 ## Veri toplama ve model eğitimi
 
@@ -172,6 +206,8 @@ backend/
   devices.py       Cihaz adları (Linux sysfs / Windows DirectShow), capture card
                    seçimi, otomatik format/çözünürlük
   shortcuts.py     Masaüstü kısayolu ve otomatik başlatma
+  needle.py        İğne algılama, hedef takibi, rehber geometrisi
+  biopsy.py        Canlı biyopsi takibi (arka plan), anlık görüntü kaydı
   segmentation.py  UNet++ (.pth / .onnx) çıkarımı, ROI kırpma
   measure.py       Maske → kontur, G/AP/en uzun çap, kalibrasyon
   tirads.py        ACR TI-RADS puanlama ve boyut eşikleri (tek doğruluk kaynağı)

@@ -186,7 +186,7 @@ async function updateScore() {
   S.lastScore = r;
   const s = r.score, rec = r.recommendation;
   const card = $("resultCard");
-  card.className = "card result" + (s.level ? " lvl" + s.level : "");
+  for (let i = 1; i <= 5; i++) card.classList.toggle("lvl" + i, s.level === i);
   $("trLevel").textContent = s.level ? s.level_text : "TR –";
   $("trPoints").textContent = s.total ?? "–";
   const names = { composition: "Komp.", echogenicity: "Ekoj.", shape: "Şekil", margin: "Kenar", foci: "Odak" };
@@ -852,13 +852,219 @@ function resetAll() {
 const VIEW_TR = { transverse: "Transvers", longitudinal: "Longitudinal" };
 
 function setMode(m) {
+  const prev = S.mode;
   S.mode = m;
   document.body.classList.toggle("mode-annot", m === "annot");
-  $("modeClinical").classList.toggle("active", m !== "annot");
+  document.body.classList.toggle("mode-biopsy", m === "biopsy");
+  $("modeClinical").classList.toggle("active", m === "clinical");
   $("modeAnnot").classList.toggle("active", m === "annot");
+  $("modeBiopsy").classList.toggle("active", m === "biopsy");
   $("viewerBadge").dataset.mode = m;
-  store("mode", m);
+  if (m !== "biopsy") store("mode", m);   // biyopsi modu açılışta hatırlanmaz
   if (m === "annot") refreshDataset();
+  if (m === "biopsy" && prev !== "biopsy") enterBiopsy();
+  else if (m !== "biopsy" && prev === "biopsy") exitBiopsy();
+}
+
+// --------------------------------------------------------- biyopsi rehberi
+const B = { es: null, st: null, pick: null, raf: 0, snapBusy: false };
+const ov = $("ov"), octx = ov.getContext("2d");
+const BX_STATUS = {
+  searching: "İğne aranıyor", tracking: "İğne izleniyor",
+  on_track: "Rotada", off_track: "Sapma var", in_target: "Uç hedefte", passed: "Uç hedefi geçti",
+};
+const BX_COLOR = {
+  searching: "#8b98a8", tracking: "#4cc3f0", on_track: "#3fb950",
+  off_track: "#f2a93b", in_target: "#7ee787", passed: "#f85149",
+};
+
+async function enterBiopsy() {
+  setTool(null);
+  setLiveMode(true);                       // biyopsi her zaman canlı görüntüde
+  $("cv").style.display = "none";
+  try { await api("/api/biopsy/start", { method: "POST" }); }
+  catch (e) { toast(e.message, true); }
+  if (B.es) B.es.close();
+  B.es = new EventSource("/api/biopsy/events");
+  B.es.onmessage = (ev) => { try { B.st = JSON.parse(ev.data); } catch (_) { return; } onBiopsyState(); };
+  B.es.onerror = () => { $("bxPerf").textContent = "Bağlantı yeniden kuruluyor…"; };
+  const p = B.st?.plan;
+  if (!p || !p.target) setPick("target");
+  window.addEventListener("resize", drawOverlay);
+}
+
+async function exitBiopsy() {
+  setPick(null);
+  if (B.es) { B.es.close(); B.es = null; }
+  B.st = null;
+  try { await api("/api/biopsy/stop", { method: "POST" }); } catch (_) {}
+  octx.clearRect(0, 0, ov.width, ov.height);
+  switchView(S.view);                      // donmuş kare varsa geri getir
+}
+
+function setPick(what) {
+  B.pick = what;
+  ov.classList.toggle("picking", !!what);
+  $("bxPickTarget").classList.toggle("active", what === "target");
+  $("bxPickEntry").classList.toggle("active", what === "entry");
+  const h = $("bxHint");
+  h.hidden = !what;
+  if (what === "target") h.textContent = "Hedefe (nodülün iğnenin ulaşacağı noktasına) tıklayın";
+  else if (what === "entry") h.textContent = "İğnenin görüntüye gireceği noktaya tıklayın (prob kenarı) · atlamak için Esc";
+}
+
+// Canlı görüntü ile aynı "contain" yerleşimi
+function ovTransform() {
+  const r = $("viewer").getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const fs = B.st?.frame_size || S.status?.capture?.resolution;
+  if (!fs) return null;
+  const s = Math.min(r.width / fs[0], r.height / fs[1]);
+  return { s: s * dpr, ox: (r.width - fs[0] * s) / 2 * dpr, oy: (r.height - fs[1] * s) / 2 * dpr, dpr, r };
+}
+
+ov.addEventListener("click", async (ev) => {
+  if (!B.pick) return;
+  const t = ovTransform();
+  if (!t) return toast("Görüntü bekleniyor.");
+  const p = [((ev.clientX - t.r.left) * t.dpr - t.ox) / t.s, ((ev.clientY - t.r.top) * t.dpr - t.oy) / t.s];
+  const fs = B.st.frame_size;
+  if (p[0] < 0 || p[1] < 0 || p[0] > fs[0] || p[1] > fs[1]) return;
+  const what = B.pick;
+  try {
+    await api("/api/biopsy/plan", { json: what === "target" ? { target: p, radius_mm: +$("bxRadius").value || 5 } : { entry: p } });
+    if (what === "target" && !B.st?.plan?.entry) setPick("entry");
+    else setPick(null);
+  } catch (e) { toast(e.message, true); }
+});
+
+function fmt(v, unit, digits = 1) { return v == null || Number.isNaN(v) ? "–" : `${v.toFixed(digits)} ${unit}`; }
+
+function onBiopsyState() {
+  const st = B.st;
+  if (!st || !st.active) return;
+  const g = st.guide || {}, unit = g.unit || "mm";
+  let status = g.status || "searching";
+  const el = $("bxStatus");
+  el.dataset.s = status;
+  let txt = BX_STATUS[status] || status;
+  if (status === "on_track" && g.tip_to_target != null) txt += ` · hedefe ${g.tip_to_target.toFixed(1)} ${unit}`;
+  if (status === "off_track" && g.miss != null)
+    txt += ` · ${g.miss.toFixed(1)} ${unit} (hedef hattın ${g.target_side === "deeper" ? "altında" : "üstünde"})`;
+  if (status === "tracking") txt += " · hedef seçin (T)";
+  el.textContent = txt;
+  const warns = [];
+  if (!st.mm_per_px) warns.push("Kalibrasyon yok: mesafeler piksel cinsinden.");
+  if (st.target_lost) warns.push("Hedef takibi zayıfladı; gerekirse hedefi yeniden seçin (T).");
+  if (st.error) warns.push("Takip hatası: " + st.error);
+  $("bxWarn").textContent = warns.join(" ");
+  $("bxTipT").textContent = fmt(g.tip_to_target, unit);
+  $("bxMiss").textContent = fmt(g.miss, unit);
+  $("bxRemain").textContent = g.remaining != null && g.remaining > 0 ? fmt(g.remaining, unit) : (g.remaining != null ? "0" : "–");
+  $("bxAngle").textContent = g.needle_angle_deg != null ? `${g.needle_angle_deg.toFixed(0)}°` : "–";
+  $("bxAngDiff").textContent = g.angle_diff_deg != null ? `${g.angle_diff_deg > 0 ? "+" : ""}${g.angle_diff_deg.toFixed(0)}°` : "–";
+  $("bxDepth").textContent = fmt(g.tip_depth, unit);
+  $("bxPerf").textContent = `Takip: ${st.fps ?? "–"} kare/sn · ${st.proc_ms != null ? st.proc_ms.toFixed(0) : "–"} ms`;
+  if (!B.raf) B.raf = requestAnimationFrame(() => { B.raf = 0; drawOverlay(); });
+}
+
+function drawOverlay() {
+  const r = $("viewer").getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  if (ov.width !== Math.round(r.width * dpr) || ov.height !== Math.round(r.height * dpr)) {
+    ov.width = Math.round(r.width * dpr); ov.height = Math.round(r.height * dpr);
+  }
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.clearRect(0, 0, ov.width, ov.height);
+  const st = B.st, t = ovTransform();
+  if (!st || !st.active || !t || S.status?.capture?.status !== "açık") return;
+  const P = (p) => [p[0] * t.s + t.ox, p[1] * t.s + t.oy];
+  const g = st.guide || {}, plan = st.plan || {}, nd = st.needle;
+  const R = (g.target_radius_px || 25) * t.s;
+  const status = g.status || "searching", col = BX_COLOR[status] || "#ccc";
+  const mm = st.mm_per_px;
+  octx.lineCap = "round";
+
+  // Planlanan yol: koridor + kesikli çizgi + hedefe kalan cm işaretleri
+  if (plan.target && plan.entry) {
+    const a = P(plan.entry), b = P(plan.target);
+    octx.save();
+    octx.strokeStyle = "rgba(76,195,240,.13)"; octx.lineWidth = 2 * R;
+    octx.beginPath(); octx.moveTo(a[0], a[1]); octx.lineTo(b[0], b[1]); octx.stroke();
+    octx.strokeStyle = "rgba(76,195,240,.85)"; octx.lineWidth = 1.5 * dpr; octx.setLineDash([8 * dpr, 6 * dpr]);
+    octx.beginPath(); octx.moveTo(a[0], a[1]); octx.lineTo(b[0], b[1]); octx.stroke();
+    octx.setLineDash([]);
+    if (mm) {
+      const L = Math.hypot(plan.target[0] - plan.entry[0], plan.target[1] - plan.entry[1]);
+      const ux = (plan.entry[0] - plan.target[0]) / L, uy = (plan.entry[1] - plan.target[1]) / L;
+      octx.fillStyle = "rgba(191,233,251,.95)"; octx.font = `${11 * dpr}px system-ui, sans-serif`;
+      for (let cm = 1; cm * 10 / mm < L; cm++) {
+        const d = cm * 10 / mm, q = P([plan.target[0] + ux * d, plan.target[1] + uy * d]);
+        const nx = -uy * 7 * dpr, ny = ux * 7 * dpr;
+        octx.strokeStyle = "rgba(191,233,251,.9)"; octx.lineWidth = 1.5 * dpr;
+        octx.beginPath(); octx.moveTo(q[0] - nx, q[1] - ny); octx.lineTo(q[0] + nx, q[1] + ny); octx.stroke();
+        octx.fillText(`${cm}`, q[0] + nx * 1.6, q[1] + ny * 1.6);
+      }
+    }
+    // giriş noktası
+    octx.fillStyle = "rgba(76,195,240,.9)";
+    octx.beginPath(); octx.arc(a[0], a[1], 4 * dpr, 0, 7); octx.fill();
+    octx.restore();
+  }
+  // Hedef
+  if (plan.target) {
+    const c = P(plan.target), tc = st.target_lost ? "#f2a93b" : status === "in_target" ? "#7ee787" : "#4cc3f0";
+    octx.save();
+    octx.strokeStyle = tc; octx.lineWidth = 2 * dpr;
+    octx.beginPath(); octx.arc(c[0], c[1], R, 0, 7); octx.stroke();
+    octx.beginPath();
+    octx.moveTo(c[0] - R - 6 * dpr, c[1]); octx.lineTo(c[0] - R * 0.4, c[1]);
+    octx.moveTo(c[0] + R * 0.4, c[1]); octx.lineTo(c[0] + R + 6 * dpr, c[1]);
+    octx.moveTo(c[0], c[1] - R - 6 * dpr); octx.lineTo(c[0], c[1] - R * 0.4);
+    octx.moveTo(c[0], c[1] + R * 0.4); octx.lineTo(c[0], c[1] + R + 6 * dpr);
+    octx.stroke();
+    octx.restore();
+  }
+  // İğne + tahmini yol
+  if (nd && nd.found) {
+    const e = P(nd.entry), tp = P(nd.tip);
+    const ux = tp[0] - e[0], uy = tp[1] - e[1], L = Math.hypot(ux, uy) || 1;
+    const roi = st.roi_px ? [P([st.roi_px[0], st.roi_px[1]]), P([st.roi_px[2], st.roi_px[3]])] : null;
+    let far = [tp[0] + ux / L * 4000, tp[1] + uy / L * 4000];
+    if (roi) {  // görüntü alanında kes
+      let k = 4000;
+      if (ux / L > 1e-6) k = Math.min(k, (roi[1][0] - tp[0]) / (ux / L));
+      if (ux / L < -1e-6) k = Math.min(k, (roi[0][0] - tp[0]) / (ux / L));
+      if (uy / L > 1e-6) k = Math.min(k, (roi[1][1] - tp[1]) / (uy / L));
+      far = [tp[0] + ux / L * Math.max(0, k), tp[1] + uy / L * Math.max(0, k)];
+    }
+    octx.save();
+    octx.strokeStyle = col; octx.globalAlpha = 0.85; octx.lineWidth = 1.5 * dpr; octx.setLineDash([5 * dpr, 6 * dpr]);
+    octx.beginPath(); octx.moveTo(tp[0], tp[1]); octx.lineTo(far[0], far[1]); octx.stroke();
+    octx.setLineDash([]); octx.globalAlpha = 1;
+    octx.lineWidth = 3 * dpr;
+    octx.shadowColor = "rgba(0,0,0,.7)"; octx.shadowBlur = 4 * dpr;
+    octx.beginPath(); octx.moveTo(e[0], e[1]); octx.lineTo(tp[0], tp[1]); octx.stroke();
+    octx.beginPath(); octx.arc(tp[0], tp[1], 7 * dpr, 0, 7); octx.stroke();
+    octx.shadowBlur = 0;
+    if (g.tip_to_target != null) {
+      const txt = `${g.tip_to_target.toFixed(1)} ${g.unit}`;
+      octx.font = `600 ${14 * dpr}px system-ui, sans-serif`;
+      const tw = octx.measureText(txt).width, tx = tp[0] + 12 * dpr, ty = tp[1] - 12 * dpr;
+      octx.fillStyle = "rgba(0,0,0,.7)"; octx.fillRect(tx - 4 * dpr, ty - 15 * dpr, tw + 8 * dpr, 20 * dpr);
+      octx.fillStyle = col; octx.fillText(txt, tx, ty);
+    }
+    octx.restore();
+  }
+}
+
+async function biopsySnapshot() {
+  if (B.snapBusy) return;
+  B.snapBusy = true;
+  try {
+    const r = await api("/api/biopsy/snapshot", { json: { study_no: $("bxStudy").value, operator: $("radiologist").value } });
+    const g = B.st?.guide || {};
+    toast(`Kaydedildi: ${r.name} · ${BX_STATUS[g.status] || ""}${g.tip_to_target != null ? " · uç–hedef " + g.tip_to_target.toFixed(1) + " " + g.unit : ""}`);
+  } catch (e) { toast(e.message, true); }
+  finally { B.snapBusy = false; }
 }
 
 async function refreshDataset() {
@@ -1091,6 +1297,13 @@ async function init() {
   bindSettings();
   $("modeClinical").onclick = () => setMode("clinical");
   $("modeAnnot").onclick = () => setMode("annot");
+  $("modeBiopsy").onclick = () => setMode("biopsy");
+  $("bxPickTarget").onclick = () => setPick(B.pick === "target" ? null : "target");
+  $("bxPickEntry").onclick = () => setPick(B.pick === "entry" ? null : "entry");
+  $("bxClear").onclick = async () => { await api("/api/biopsy/plan", { json: { clear: true } }).catch((e) => toast(e.message, true)); setPick("target"); };
+  $("bxSnap").onclick = biopsySnapshot;
+  $("bxRadius").addEventListener("change", () => api("/api/biopsy/plan", { json: { radius_mm: +$("bxRadius").value || 5 } }).catch(() => {}));
+  $("bxTrack").addEventListener("change", () => api("/api/biopsy/plan", { json: { track_target: $("bxTrack").checked } }).catch(() => {}));
   $("btnAnnSave").onclick = saveAnnotation;
   $("btnNextNodule").onclick = nextNodule;
   $("btnExport").onclick = exportDataset;
@@ -1132,6 +1345,14 @@ async function init() {
       return;
     }
     if (e.altKey) return;
+    if (S.mode === "biopsy") {
+      if (k === "t") setPick("target");
+      else if (k === "g") setPick("entry");
+      else if (k === "f") biopsySnapshot();
+      else if (k === "escape") setPick(null);
+      else if (e.code === "Space") { e.preventDefault(); toast("Biyopsi modunda dondurma kapalı; iğne konumunu F ile kaydedin."); }
+      return;
+    }
     const map = { a: "ai", w: "width", h: "ap", l: "length", d: "draw", e: "edit", k: "splice" };
     if (k === "enter" && S.tool !== "draw" && isPending(cur())) { e.preventDefault(); return confirmContour(); }
     if ((k === "delete" || k === "backspace") && cur().contour) { e.preventDefault(); return deleteContour(); }

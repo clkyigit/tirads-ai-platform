@@ -9,6 +9,7 @@ okuma hızını beklemez.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -33,6 +34,13 @@ class DemoSource:
         rng = np.random.default_rng(7)
         self.speckle = rng.rayleigh(1.0, (height * 2, width * 2)).astype(np.float32)
         self.t0 = time.time()
+        self.needle = False        # biyopsi modunda iğne animasyonu
+        self.needle_t0 = time.time()
+
+    def set_needle(self, on: bool):
+        if on and not self.needle:
+            self.needle_t0 = time.time()
+        self.needle = on
 
     def read(self):
         t = time.time() - self.t0
@@ -47,16 +55,20 @@ class DemoSource:
         yy, xx = np.mgrid[0:y1 - y0, 0:x1 - x0]
         field *= np.where(yy < 50, 0.6, 1.0)
         # Hipoekoik solid nodül (hafif nefes hareketi)
-        cx = (x1 - x0) * 0.48 + 6 * np.sin(t * 1.3)
-        cy = (y1 - y0) * 0.45
+        # Doku bütün olarak hareket eder: nodül benek dokusuyla birlikte kayar
+        cx = (x1 - x0) * 0.48 - (ox - 20)
+        cy = (y1 - y0) * 0.45 - (oy - 20)
         a, b = 92, 70  # yarı eksenler (px): çap 184×140 px ≈ 4,6×3,5 cm
         nod = ((xx - cx) / a) ** 2 + ((yy - cy) / b) ** 2 <= 1
         field[nod] *= 0.38
         # Küçük anekoik kist
-        kist = ((xx - (x1 - x0) * 0.78) ** 2 + (yy - (y1 - y0) * 0.30) ** 2) <= 22 ** 2
+        kist = ((xx - (x1 - x0) * 0.78 + (ox - 20)) ** 2
+                + (yy - (y1 - y0) * 0.30 + (oy - 20)) ** 2) <= 22 ** 2
         field[kist] *= 0.05
         # Derinlik zayıflaması
         field *= np.linspace(1.15, 0.7, y1 - y0)[:, None]
+        if self.needle:
+            self._draw_needle(field, cx, cy, x1 - x0)
         img[y0:y1, x0:x1] = field
         img = np.clip(img, 0, 255).astype(np.uint8)
         frame = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -78,6 +90,24 @@ class DemoSource:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
         time.sleep(1 / 30)
         return True, frame
+
+    def _draw_needle(self, field, cx, cy, fw):
+        """Sağ üstten nodüle doğru ilerleyen in-plane iğne (12 sn döngü):
+        0–7 sn ilerler, 7–10 sn nodülde bekler, 10–12 sn geri çekilir."""
+        tt = (time.time() - self.needle_t0) % 12.0
+        entry = (fw - 12.0, 14.0)
+        aim = (cx, cy)
+        ang = math.atan2(aim[1] - entry[1], aim[0] - entry[0]) + math.radians(1.5 * math.sin(tt))
+        full = math.dist(entry, aim) + 10
+        frac = min(1.0, tt / 7.0) if tt < 10 else max(0.0, 1 - (tt - 10) / 2)
+        L = 40 + (full - 40) * frac
+        u = (math.cos(ang), math.sin(ang))
+        tip = (entry[0] + u[0] * L, entry[1] + u[1] * L)
+        cv2.line(field, (int(entry[0]), int(entry[1])), (int(tip[0]), int(tip[1])), 235, 3,
+                 cv2.LINE_AA)
+        for k, val in ((8, 110), (16, 70)):   # reverberasyon
+            cv2.line(field, (int(entry[0]), int(entry[1] + k)),
+                     (int(tip[0]), int(tip[1] + k)), val, 1, cv2.LINE_AA)
 
     def release(self):
         pass
@@ -110,6 +140,7 @@ class CaptureManager:
         self.signal = True
         self.log: list[str] = []
         self.connected_at = 0.0
+        self.demo_needle = False
         self._lister = lister or devices.list_devices
         self._opener = opener or cv2.VideoCapture
         self._on_negotiated = on_negotiated
@@ -154,7 +185,9 @@ class CaptureManager:
             self.backend_name = "demo"
             self.device = {"name": "Demo (sentetik)", "fourcc": "-",
                            "compressed": False}
-            return DemoSource()
+            src = DemoSource()
+            src.set_needle(self.demo_needle)
+            return src
         if kind == "file":
             path = c.get("path") or ""
             if not Path(path).exists():
@@ -260,6 +293,11 @@ class CaptureManager:
                 self.fps = n / (now - t_last)
                 n, t_last = 0, now
         self._release()
+
+    def set_demo_needle(self, on: bool):
+        self.demo_needle = on
+        if isinstance(self._src, DemoSource):
+            self._src.set_needle(on)
 
     # ---------------------------------------------------------------- erişim
     def latest(self) -> tuple[int, np.ndarray | None]:
