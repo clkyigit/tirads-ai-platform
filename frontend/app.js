@@ -73,11 +73,7 @@ async function refreshStatus() {
     return;
   }
   const c = S.status.capture, m = S.status.model, cal = S.status.calibration;
-  const srcName = { device: `Capture #${c.source.index}`, file: "Dosya", demo: "Demo" }[c.source.type] || "–";
-  const chipS = $("chipSource");
-  chipS.textContent = `${srcName}: ${c.status}` + (c.resolution ? ` · ${c.resolution[0]}×${c.resolution[1]} · ${c.fps} fps` : "");
-  chipS.className = "chip " + (c.status === "açık" ? "ok" : c.status === "hata" ? "bad" : "warn");
-  chipS.title = c.error || "";
+  renderSource(c);
   const chipM = $("chipModel");
   chipM.textContent = m.ready ? `Model: ${m.is_demo ? "DEMO" : "UNet++ " + m.backend} (${m.device})` : "Model: yok";
   chipM.className = "chip " + (m.ready ? (m.is_demo ? "warn" : "ok") : "bad");
@@ -87,6 +83,51 @@ async function refreshStatus() {
   chipC.className = "chip " + (cal.mm_per_px ? "ok" : "warn");
   $("calWarn").hidden = !!cal.mm_per_px;
   document.querySelector('[data-tool="ai"]').disabled = !m.ready || !cur().frameId;
+}
+
+// Kaynak durumu: üst çip + canlı görüntü üzerindeki durum ekranı
+let lastConnectedAt = 0;
+function renderSource(c) {
+  const d = c.device || {};
+  const chip = $("chipSource");
+  const open = c.status === "açık";
+  let txt, cls;
+  if (open) {
+    txt = `${d.name || "Kaynak"} · ${c.resolution ? c.resolution[0] + "×" + c.resolution[1] : "–"} · ${d.fourcc || ""} · ${c.fps} fps`;
+    cls = !c.signal ? "warn" : d.compressed && c.source.type !== "demo" && c.source.type !== "file" ? "warn" : "ok";
+    if (!c.signal) txt += " · sinyal yok";
+  } else if (c.status === "bekleniyor") { txt = "Capture card bekleniyor"; cls = "warn"; }
+  else if (c.status === "bağlanıyor") { txt = "Capture card bağlanıyor…"; cls = "warn"; }
+  else { txt = "Kaynak hatası"; cls = "bad"; }
+  chip.textContent = txt;
+  chip.className = "chip " + cls;
+  chip.title = [c.error, d.compressed && open ? "Sıkıştırmalı format (MJPG): ince ayrıntılar bozulabilir." : ""].filter(Boolean).join("\n");
+
+  // Durum ekranı (yalnızca canlı görünümde)
+  const vs = $("viewerState");
+  let state = null, title = "", text = "";
+  if (c.status === "bekleniyor") {
+    state = "wait"; title = "Capture card bekleniyor";
+    text = "Capture card'ı USB'ye takın; görüntü kendiliğinden gelecek." + (c.error && c.error.includes("Yok sayılan") ? " " + c.error.replace("Capture card bulunamadı. ", "") : "");
+  } else if (c.status === "bağlanıyor") {
+    state = "connecting"; title = "Bağlanıyor…"; text = "En iyi görüntü formatı deneniyor (birkaç saniye).";
+  } else if (c.status === "hata") {
+    state = "error"; title = "Capture card açılamadı";
+    text = (c.error || "") + " Kartı çıkarıp yeniden takmayı deneyin." +
+      (navigator.platform.toLowerCase().includes("linux") ? " Linux'ta kullanıcı 'video' grubunda olmalı." : "");
+  } else if (open && !c.signal) {
+    state = "nosignal"; title = "Sinyal yok";
+    text = "Capture card bağlı ama görüntü gelmiyor. USG cihazının video çıkışının (HDMI/DVI) açık ve kablonun takılı olduğunu kontrol edin.";
+  }
+  const showState = state && !cur().frameId;
+  vs.hidden = !showState;
+  if (showState) { vs.className = "viewer-state " + state; $("vsTitle").textContent = title; $("vsText").textContent = text; }
+
+  if (open && c.connected_at && c.connected_at !== lastConnectedAt) {
+    if (lastConnectedAt) toast(`Bağlandı: ${d.name} · ${c.resolution ? c.resolution.join("×") : ""} · ${d.fourcc}` + (d.compressed && c.source.type === "auto" ? " (sıkıştırmalı format)" : ""));
+    lastConnectedAt = c.connected_at;
+    if (!cur().frameId) live.src = "/api/stream?" + Date.now();  // akışı tazele
+  }
 }
 
 // ------------------------------------------------------- TI-RADS formu
@@ -225,6 +266,8 @@ const toImg = (ev) => {
 const toCv = (p) => [p[0] * T.s + T.ox, p[1] * T.s + T.oy];
 
 function setLiveMode(isLive) {
+  if (!isLive) $("viewerState").hidden = true;
+  else if (S.status) setTimeout(() => renderSource(S.status.capture), 0);
   live.style.display = isLive ? "block" : "none";
   cv.style.display = isLive ? "none" : "block";
   const b = $("viewerBadge");
@@ -704,7 +747,10 @@ function renderSettings() {
   const st = S.status; if (!st) return;
   const src = st.capture.source;
   $("srcType").value = src.type; $("srcIndex").value = src.index ?? 0; $("srcPath").value = src.path || "";
-  $("srcW").value = src.width || 1920; $("srcH").value = src.height || 1080; $("srcFourcc").value = src.fourcc || "";
+  $("srcW").value = src.width || 1920; $("srcH").value = src.height || 1080;
+  $("srcFourcc").value = (src.fourcc || "auto").toUpperCase() === "AUTO" ? "auto" : src.fourcc.toUpperCase();
+  syncSourceFields();
+  $("devLog").textContent = (st.capture.log || []).join("\n") || "–";
   const cal = st.calibration;
   $("calManual").value = cal.mm_per_px ? cal.mm_per_px.toFixed(5) : "";
   const pr = $("calPresets"); pr.innerHTML = "";
@@ -735,25 +781,74 @@ async function calCall(body) {
   catch (e) { toast(e.message, true); }
 }
 
+function syncSourceFields() {
+  const t = $("srcType").value, manual = $("srcFourcc").value !== "auto";
+  document.querySelectorAll(".src-device").forEach((e) => (e.hidden = t !== "device"));
+  document.querySelectorAll(".src-file").forEach((e) => (e.hidden = t !== "file"));
+  document.querySelectorAll(".src-manual").forEach((e) => (e.hidden = !manual || t === "demo" || t === "file"));
+}
+
+async function applySource(body, msg) {
+  try {
+    await api("/api/source", { json: body });
+    if (!cur().frameId) live.src = "/api/stream?" + Date.now();
+    toast(msg);
+    setTimeout(async () => { await refreshStatus(); renderSettings(); loadDevices(); }, 1500);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadDevices() {
+  const box = $("devList");
+  box.innerHTML = '<span class="muted">Taranıyor…</span>';
+  let r;
+  try { r = await api("/api/devices"); } catch (e) { box.textContent = e.message; return; }
+  box.innerHTML = "";
+  if (!r.devices.length) {
+    box.innerHTML = '<span class="muted">Video cihazı bulunamadı. Capture card\'ı takın.</span>';
+    return;
+  }
+  const src = S.status.capture.source;
+  for (const d of r.devices) {
+    const row = document.createElement("div");
+    row.className = "dev" + (d.active ? " active" : "");
+    const tags = [];
+    if (d.active) tags.push('<span class="tag ok">kullanılıyor</span>');
+    if (d.preferred) tags.push('<span class="tag ok">tercih edilen</span>');
+    else if (d.auto_choice && !d.active) tags.push('<span class="tag">otomatik seçim</span>');
+    if (d.ignored) tags.push('<span class="tag warn">yok sayılıyor</span>');
+    else if (d.looks_like_webcam) tags.push('<span class="tag warn">kamera</span>');
+    else if (d.looks_like_capture) tags.push('<span class="tag">capture card</span>');
+    const nm = document.createElement("span"); nm.className = "name";
+    nm.textContent = `#${d.index} ${d.name}`;
+    row.appendChild(nm);
+    row.insertAdjacentHTML("beforeend", tags.join(""));
+    const use = document.createElement("button"); use.type = "button"; use.className = "ghost";
+    use.textContent = d.preferred ? "Tercihi kaldır" : "Bunu kullan";
+    use.onclick = () => applySource(d.preferred ? { type: "auto", device_name: "" } :
+      { type: "auto", device_name: d.name, ignore: (src.ignore || []).filter((x) => x.toLowerCase() !== d.name.toLowerCase()) },
+      d.preferred ? "Otomatik seçime dönüldü." : `Tercih: ${d.name}`);
+    const ign = document.createElement("button"); ign.type = "button"; ign.className = "ghost";
+    ign.textContent = d.ignored ? "Yok saymayı kaldır" : "Yok say";
+    ign.onclick = () => {
+      const list = (src.ignore || []).filter((x) => x.toLowerCase() !== d.name.toLowerCase());
+      if (!d.ignored) list.push(d.name);
+      applySource({ type: "auto", ignore: list, ...(d.preferred && !d.ignored ? { device_name: "" } : {}) },
+        d.ignored ? `${d.name} tekrar kullanılabilir.` : `${d.name} yok sayılacak.`);
+    };
+    row.append(use, ign);
+    box.appendChild(row);
+  }
+}
+
 function bindSettings() {
-  $("btnSettings").onclick = async () => { await refreshStatus(); renderSettings(); await loadModelForm(); $("dlgSettings").showModal(); };
-  $("btnProbe").onclick = async () => {
-    $("probeOut").textContent = "Taranıyor…";
-    try {
-      const r = await api("/api/devices");
-      $("probeOut").textContent = r.devices.length ? "Bulunan: " + r.devices.map((d) => `#${d.index} (${d.width}×${d.height}, ${d.backend})`).join(", ") : "Cihaz bulunamadı. Kaynak şu an açıksa önce Demo'ya alıp tekrar tarayın.";
-    } catch (e) { $("probeOut").textContent = e.message; }
-  };
-  $("btnSrcApply").onclick = async () => {
-    try {
-      await api("/api/source", { json: {
-        type: $("srcType").value, index: +$("srcIndex").value, path: $("srcPath").value,
-        width: +$("srcW").value, height: +$("srcH").value, fourcc: $("srcFourcc").value,
-      } });
-      if (!cur().frameId) live.src = "/api/stream?" + Date.now();
-      setTimeout(refreshStatus, 1500); toast("Kaynak değiştirildi.");
-    } catch (e) { toast(e.message, true); }
-  };
+  $("btnSettings").onclick = async () => { await refreshStatus(); renderSettings(); await loadModelForm(); $("dlgSettings").showModal(); loadDevices(); };
+  $("btnProbe").onclick = loadDevices;
+  $("srcType").onchange = syncSourceFields;
+  $("srcFourcc").onchange = syncSourceFields;
+  $("btnSrcApply").onclick = () => applySource({
+    type: $("srcType").value, index: +$("srcIndex").value, path: $("srcPath").value,
+    width: +$("srcW").value, height: +$("srcH").value, fourcc: $("srcFourcc").value,
+  }, "Kaynak değiştirildi.");
   document.querySelectorAll("[data-area]").forEach((b) => (b.onclick = () => {
     if (!cur().frameId) return toast("Önce görüntüyü dondurun.");
     $("dlgSettings").close(); setTool(b.dataset.area);
@@ -846,6 +941,6 @@ async function init() {
   });
 
   setLiveMode(true); fit(); renderDims();
-  setInterval(refreshStatus, 3000);
+  setInterval(refreshStatus, 1500);
 }
 init();

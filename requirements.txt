@@ -4,5 +4,7 @@ uvicorn>=0.29
 numpy>=1.24
 opencv-python-headless>=4.8   # GUI kütüphanesi (libGL) gerektirmez
 onnxruntime>=1.17
+# Windows'ta capture card'ı adıyla tanımak için (DirectShow)
+pygrabber>=0.2; sys_platform == "win32"
 # DICOM görüntü yükleme (opsiyonel ama önerilir)
 pydicom>=2.4

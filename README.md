@@ -34,7 +34,15 @@ run.bat --ml       :: PyTorch (.pth) desteğini de kur
 ./run.sh --demo    # donanım ve model olmadan deneme
 ./run.sh --ml      # PyTorch (.pth) desteğini de kur
 ```
-Linux'ta kullanıcı `video` grubunda olmalı: `sudo usermod -aG video $USER` (sonra oturumu yeniden açın).
+Linux'ta capture card'a erişim: masaüstü oturumu açık kullanıcı çoğu dağıtımda (Ubuntu, Pardus) cihaza otomatik erişir. "açılamadı" hatası alırsanız kullanıcıyı `video` grubuna ekleyin: `sudo usermod -aG video $USER` (sonra oturumu yeniden açın).
+
+**Masaüstü kısayolu** (bir kez):
+```bash
+./run.sh --kisayol                     # Linux: masaüstü + uygulama menüsü
+./run.sh --kisayol --otomatik-baslat   # ayrıca oturum açılınca kendiliğinden başlasın
+run.bat --kisayol [--otomatik-baslat]  # Windows
+```
+Sonrasında masaüstündeki **TI-RADS AI** simgesine çift tıklamanız yeterli. Program zaten açıksa ikinci tıklama yalnızca tarayıcıyı açar. Kaldırmak için: `--kisayol-kaldir`.
 
 Tarayıcı otomatik açılır: <http://127.0.0.1:8765>. Varsayılan olarak yalnızca bu bilgisayardan erişilir. Ağdan erişim için `--host 0.0.0.0` kullanın; bu durumda KVKK ve hastane ağ politikasını göz önünde bulundurun.
 
@@ -42,7 +50,8 @@ Tarayıcı otomatik açılır: <http://127.0.0.1:8765>. Varsayılan olarak yaln�
 
 ## İlk kurulum (bir kez)
 
-1. **Ayarlar → Görüntü kaynağı:** "Capture card" seçin, **Tara** ile cihaz numarasını bulun. Format olarak **YUY2/NV12** (sıkıştırmasız) seçin. MJPG, ince ekojenik odakları bozabilir.
+1. **Capture card'ı takın; ayar gerekmez.** Program kartı adından tanır (dahili/USB webcam'leri seçmez). En iyi formatı kendisi dener: önce sıkıştırmasız YUY2/NV12, yeterli kare hızı yoksa MJPG; MJPG'ye düşerse üst şeritte sarı uyarı çıkar. Bulduğu ayarı hatırlar, sonraki takışta beklemeden açar. Kart çıkarılınca "Capture card bekleniyor" ekranı görünür, yeniden takılınca görüntü kendiliğinden gelir. USG'den görüntü gelmiyorsa "Sinyal yok" uyarısı çıkar.
+   Yanlış cihaz seçilirse: **Ayarlar → Bulunan video cihazları** → doğru cihazda **Bunu kullan**, istenmeyende **Yok say**.
 2. Görüntüyü **dondurun** (Space).
 3. **Ayarlar → Ekran alanları:**
    - *Görüntü alanını (ROI) çiz:* yalnızca USG görüntüsünü kapsayın. Menüler ve yazılar dışarıda kalsın; model sadece bu alanı görür.
@@ -146,7 +155,10 @@ Model dosyası yoksa uygulama yine çalışır; konturlar elle çizilir. `--demo
 ```
 backend/
   server.py        HTTP API + statik dosyalar (Starlette/uvicorn)
-  capture.py       Capture card okuma thread'i, cihaz tarama, demo kaynak
+  capture.py       Okuma thread'i, tak-çıkar, sinyal yok tespiti, demo kaynak
+  devices.py       Cihaz adları (Linux sysfs / Windows DirectShow), capture card
+                   seçimi, otomatik format/çözünürlük
+  shortcuts.py     Masaüstü kısayolu ve otomatik başlatma
   segmentation.py  UNet++ (.pth / .onnx) çıkarımı, ROI kırpma
   measure.py       Maske → kontur, G/AP/en uzun çap, kalibrasyon
   tirads.py        ACR TI-RADS puanlama ve boyut eşikleri (tek doğruluk kaynağı)

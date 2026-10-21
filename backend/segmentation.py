@@ -66,6 +66,12 @@ class Segmenter:
         p = Path(path)
         if not p.is_absolute():
             p = self.base_dir / p
+        if path and not p.exists():
+            # Eğitim hem .onnx hem .pth üretir; hangisi varsa onu kullan
+            for ext in (".onnx", ".pth", ".pt"):
+                if p.with_suffix(ext).exists():
+                    p = p.with_suffix(ext)
+                    break
         if not path or not p.exists():
             self.error = (f"Model dosyası bulunamadı: {p}. Ağırlıkları bu yola "
                           "koyun ya da ayarlardan yolu değiştirin.")

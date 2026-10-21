@@ -9,7 +9,6 @@ okuma hızını beklemez.
 from __future__ import annotations
 
 import logging
-import platform
 import threading
 import time
 from pathlib import Path
@@ -17,65 +16,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from . import devices
+
 log = logging.getLogger(__name__)
-SYSTEM = platform.system()
-
-
-def _api_preference() -> list[int]:
-    if SYSTEM == "Windows":
-        return [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-    if SYSTEM == "Linux":
-        return [cv2.CAP_V4L2, cv2.CAP_ANY]
-    if SYSTEM == "Darwin":
-        return [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
-    return [cv2.CAP_ANY]
-
-
-def _api_name(api: int) -> str:
-    try:
-        return cv2.videoio_registry.getBackendName(api)
-    except Exception:
-        return str(api)
-
-
-def open_device(index: int, width: int, height: int, fps: int,
-                fourcc: str = "") -> tuple[cv2.VideoCapture, str]:
-    last_err = None
-    for api in _api_preference():
-        cap = cv2.VideoCapture(int(index), api)
-        if not cap.isOpened():
-            cap.release()
-            last_err = f"{_api_name(api)} ile açılamadı"
-            continue
-        if fourcc:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc[:4]))
-        if width and height:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-        if fps:
-            cap.set(cv2.CAP_PROP_FPS, int(fps))
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ok, _ = cap.read()
-        if ok:
-            return cap, _api_name(api)
-        cap.release()
-        last_err = f"{_api_name(api)} ile kare okunamadı"
-    raise RuntimeError(f"Cihaz {index} açılamadı ({last_err}).")
-
-
-def probe_devices(max_index: int = 6) -> list[dict]:
-    found = []
-    for i in range(max_index):
-        for api in _api_preference()[:1]:
-            cap = cv2.VideoCapture(i, api)
-            if cap.isOpened():
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    found.append({"index": i, "backend": _api_name(api),
-                                  "width": frame.shape[1],
-                                  "height": frame.shape[0]})
-            cap.release()
-    return found
 
 
 class DemoSource:
@@ -140,8 +83,18 @@ class DemoSource:
         pass
 
 
+class NoDevice(RuntimeError):
+    """Capture card takılı değil (hata değil; beklenir)."""
+
+
 class CaptureManager:
-    def __init__(self):
+    """Arka planda kare okur. type="auto" iken capture card'ı kendisi bulur,
+    çıkarılınca bekler, takılınca yeniden bağlanır."""
+
+    SCAN_INTERVAL = 1.5   # cihaz beklerken tarama aralığı (sn)
+    READ_FAILS_TO_DROP = 8
+
+    def __init__(self, lister=None, opener=None, on_negotiated=None):
         self._lock = threading.Lock()
         self._frame: np.ndarray | None = None
         self._frame_id = 0
@@ -153,12 +106,20 @@ class CaptureManager:
         self.error: str | None = None
         self.backend_name = ""
         self.fps = 0.0
+        self.device: dict | None = None     # seçilen cihaz + format bilgisi
+        self.signal = True
+        self.log: list[str] = []
+        self.connected_at = 0.0
+        self._lister = lister or devices.list_devices
+        self._opener = opener or cv2.VideoCapture
+        self._on_negotiated = on_negotiated
 
     # -------------------------------------------------------------- yönetim
     def start(self, cfg: dict):
         self.stop()
         self.cfg = dict(cfg)
         self.error = None
+        self.device = None
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="capture")
@@ -167,7 +128,7 @@ class CaptureManager:
     def stop(self):
         self._stop.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=5)
         self._thread = None
         self._release()
         self.status = "kapalı"
@@ -179,12 +140,20 @@ class CaptureManager:
             except Exception:
                 pass
         self._src = None
+        with self._lock:
+            self._frame = None
+
+    def _note(self, msg: str):
+        log.info(msg)
+        self.log = (self.log + [time.strftime("%H:%M:%S ") + msg])[-30:]
 
     def _open(self):
         c = self.cfg
-        kind = c.get("type", "demo")
+        kind = c.get("type", "auto")
         if kind == "demo":
             self.backend_name = "demo"
+            self.device = {"name": "Demo (sentetik)", "fourcc": "-",
+                           "compressed": False}
             return DemoSource()
         if kind == "file":
             path = c.get("path") or ""
@@ -194,30 +163,64 @@ class CaptureManager:
             if not cap.isOpened():
                 raise RuntimeError(f"Video açılamadı: {path}")
             self.backend_name = "dosya"
+            self.device = {"name": Path(path).name, "fourcc": "-",
+                           "compressed": True}
             return cap
-        cap, name = open_device(int(c.get("index", 0)), c.get("width", 1920),
-                                c.get("height", 1080), c.get("fps", 30),
-                                c.get("fourcc", ""))
-        self.backend_name = name
+        if kind == "device":  # elle seçilmiş indeks
+            dev = {"index": int(c.get("index", 0)),
+                   "name": c.get("device_name") or f"Cihaz #{c.get('index', 0)}"}
+        else:  # auto
+            devs = self._lister()
+            dev = devices.choose_device(devs, c.get("device_name", ""),
+                                        c.get("ignore") or [])
+            if dev is None:
+                webcams = [d["name"] for d in devs if d.get("score", 0) <= -5]
+                raise NoDevice("Capture card bulunamadı." + (
+                    f" (Yok sayılan kamera: {', '.join(webcams)})" if webcams else ""))
+        cached = (c.get("negotiated") or {}).get(dev["name"])
+        self._note(f"Bağlanılıyor: {dev['name']} (#{dev['index']})")
+        cap, info = devices.negotiate(dev["index"], c, opener=self._opener,
+                                      cached=cached, log_fn=self._note)
+        self.backend_name = info["backend"]
+        self.device = {**dev, **info}
+        self._note(f"Bağlandı: {dev['name']} · {info['width']}×{info['height']}"
+                   f" · {info['fourcc']} · {info['fps']} fps")
+        if self._on_negotiated and info.get("mode"):
+            fc, w, h = info["mode"]
+            try:
+                self._on_negotiated(dev["name"], {"fourcc": fc, "width": w,
+                                                  "height": h})
+            except Exception:
+                log.exception("Format bilgisi kaydedilemedi")
         return cap
 
     def _run(self):
         backoff = 1.0
-        n, t_last = 0, time.time()
+        n, t_last, fails, k = 0, time.time(), 0, 0
         while not self._stop.is_set():
             if self._src is None:
                 try:
-                    self.status = "bağlanıyor"
+                    self.status = "bağlanıyor" if self.status != "bekleniyor" \
+                        else "bekleniyor"
                     self._src = self._open()
                     self.status = "açık"
                     self.error = None
-                    backoff = 1.0
+                    self.signal = True
+                    self.connected_at = time.time()
+                    backoff, fails = 1.0, 0
+                except NoDevice as e:
+                    self.status = "bekleniyor"
+                    self.error = str(e)
+                    self.device = None
+                    self._stop.wait(self.SCAN_INTERVAL)
+                    continue
                 except Exception as e:
                     self.status = "hata"
                     self.error = str(e)
+                    self.device = None
                     log.warning("Kaynak açılamadı: %s", e)
                     self._stop.wait(backoff)
-                    backoff = min(backoff * 2, 10)
+                    backoff = min(backoff * 2, 8)
                     continue
             ok, frame = self._src.read()
             if not ok or frame is None:
@@ -225,13 +228,29 @@ class CaptureManager:
                     self._src.set(cv2.CAP_PROP_POS_FRAMES, 0)  # döngü
                     time.sleep(0.03)
                     continue
-                self.status = "hata"
-                self.error = "Kare okunamadı; yeniden bağlanılıyor."
-                self._release()
-                self._stop.wait(1.0)
+                fails += 1
+                if fails >= self.READ_FAILS_TO_DROP:
+                    # Kart çıkarıldı ya da sürücü takıldı: bırak, yeniden ara
+                    self._note("Bağlantı koptu; capture card yeniden aranıyor.")
+                    self.error = "Bağlantı koptu; yeniden aranıyor."
+                    self.status = "bekleniyor"
+                    self._release()
+                    self.device = None
+                    fails = 0
+                    self._stop.wait(0.5)
+                else:
+                    time.sleep(0.02)
                 continue
+            fails = 0
             if self.cfg.get("type") == "file":
                 time.sleep(1 / 30)
+            k += 1
+            if k % 10 == 1:
+                sig = not devices.is_no_signal(frame)
+                if sig != self.signal:
+                    self._note("Görüntü sinyali geldi." if sig else
+                               "Sinyal yok (tek renk görüntü).")
+                self.signal = sig
             with self._lock:
                 self._frame = frame
                 self._frame_id += 1
@@ -249,7 +268,10 @@ class CaptureManager:
 
     def info(self) -> dict:
         fid, f = self.latest()
+        src = {k: v for k, v in self.cfg.items() if k != "negotiated"}
         return {"status": self.status, "error": self.error,
                 "backend": self.backend_name, "fps": round(self.fps, 1),
-                "source": self.cfg, "frame_id": fid,
+                "source": src, "frame_id": fid, "device": self.device,
+                "signal": self.signal, "connected_at": self.connected_at,
+                "log": self.log[-8:],
                 "resolution": None if f is None else [f.shape[1], f.shape[0]]}

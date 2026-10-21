@@ -24,7 +24,8 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import dataset, measure, storage, tirads
-from .capture import CaptureManager, probe_devices
+from . import devices as devmod
+from .capture import CaptureManager
 from .config import ROOT, Config
 from .segmentation import Segmenter
 
@@ -50,7 +51,7 @@ class State:
     def __init__(self, config_path: Path | None = None, start_capture=True,
                  demo=False):
         self.cfg = Config(config_path)
-        self.capture = CaptureManager()
+        self.capture = CaptureManager(on_negotiated=self._remember_mode)
         self.frames: OrderedDict[str, dict] = OrderedDict()
         self.frames_lock = threading.Lock()
         self.model_lock = threading.Lock()
@@ -61,6 +62,11 @@ class State:
         self.segmenter = Segmenter(c["model"], ROOT)
         if start_capture:
             self.capture.start(c["source"])
+
+    def _remember_mode(self, name: str, mode: dict):
+        """Cihaz için bulunan formatı sakla: sonraki takışta hemen açılsın."""
+        if (self.cfg.get()["source"].get("negotiated") or {}).get(name) != mode:
+            self.cfg.update({"source": {"negotiated": {name: mode}}})
 
     # ----------------------------------------------------------- kareler
     def put_frame(self, img: np.ndarray, origin: str) -> dict:
@@ -116,15 +122,33 @@ def create_app(config_path: Path | None = None, start_capture=True,
         })
 
     async def devices(_):
-        return JSONResponse({"devices": await run_in_threadpool(probe_devices)})
+        info = st.capture.info()
+        # Açık cihazı yeniden açmaya çalışmamak için yalnızca adla listele
+        devs = await run_in_threadpool(devmod.list_devices,
+                                       info["status"] != "açık")
+        src = st.cfg.get()["source"]
+        chosen = devmod.choose_device(devs, src.get("device_name", ""),
+                                      src.get("ignore") or [])
+        cur = (info.get("device") or {}).get("name")
+        for d in devs:
+            d["active"] = d["name"] == cur
+            d["auto_choice"] = bool(chosen and chosen["index"] == d["index"])
+            d["ignored"] = d["name"].lower() in {x.lower() for x in src.get("ignore") or []}
+            d["preferred"] = bool(src.get("device_name")) and \
+                d["name"].lower() == src["device_name"].lower()
+        return JSONResponse({"devices": devs})
 
     async def set_source(req: Request):
         body = await req.json()
-        allowed = {"type", "index", "path", "width", "height", "fps", "fourcc"}
+        allowed = {"type", "index", "path", "width", "height", "fps", "fourcc",
+                   "device_name", "ignore"}
         patch = {k: v for k, v in body.items() if k in allowed}
-        if patch.get("type") not in ("device", "file", "demo"):
-            return _err("type: device | file | demo olmalı")
-        c = st.cfg.update({"source": patch})
+        if "type" in patch and patch["type"] not in ("auto", "device", "file", "demo"):
+            return _err("type: auto | device | file | demo olmalı")
+        if "ignore" in patch and not isinstance(patch["ignore"], list):
+            return _err("ignore bir liste olmalı")
+        c = st.cfg.update({"source": patch},
+                          replace=("source.ignore",) if "ignore" in patch else ())
         await run_in_threadpool(st.capture.start, c["source"])
         return JSONResponse({"ok": True, "source": c["source"]})
 

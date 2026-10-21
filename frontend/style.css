@@ -16,6 +16,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg); color: var(--text);
@@ -199,3 +200,36 @@ body.mode-annot .research-banner { color: var(--accent); background: #0c1f29; bo
 .ds-recent summary { cursor: pointer; }
 .ds-recent .item { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--line); }
 .ds-recent .item button { padding: 1px 7px; font-size: 12px; }
+
+/* Kaynak durumu */
+.viewer-state {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 10px; text-align: center; padding: 24px;
+  background: radial-gradient(ellipse at center, rgba(21,27,35,.92), rgba(0,0,0,.96));
+}
+.viewer-state[hidden] { display: none; }
+.vs-icon { width: 56px; height: 56px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); }
+.viewer-state.wait .vs-icon, .viewer-state.connecting .vs-icon { animation: spin 1.1s linear infinite; }
+.viewer-state.nosignal .vs-icon { border-color: var(--warn); }
+.viewer-state.error .vs-icon { border-color: var(--bad); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .viewer-state .vs-icon { animation: none !important; } }
+.vs-title { font-size: 20px; font-weight: 600; }
+.vs-text { color: var(--muted); max-width: 520px; font-size: 14px; }
+.dev-head { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+.dev-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.dev { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+.dev.active { border-color: var(--ok); }
+.dev .name { flex: 1; }
+.dev .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--bg3); color: var(--muted); }
+.dev .tag.ok { color: var(--ok); }
+.dev .tag.warn { color: var(--warn); }
+.dev button { padding: 2px 8px; font-size: 12px; }
+.dev-log pre { font: 11.5px/1.4 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; margin: 6px 0 0; }
+.viewer-state.nosignal {
+  inset: auto 12px 12px 12px; flex-direction: row; justify-content: flex-start; text-align: left;
+  padding: 10px 14px; gap: 12px; background: rgba(51, 39, 14, .92); border: 1px solid #4d3b12; border-radius: 8px;
+}
+.viewer-state.nosignal .vs-icon { width: 14px; height: 14px; flex: none; background: var(--warn); border: 0; }
+.viewer-state.nosignal .vs-title { font-size: 15px; white-space: nowrap; }
+.viewer-state.nosignal .vs-text { font-size: 13px; max-width: none; }

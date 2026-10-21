@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TI-RADS AI Platform</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -39,6 +39,11 @@
       <canvas id="cv"></canvas>
       <div class="viewer-badge" id="viewerBadge">CANLI</div>
       <div class="viewer-msg" id="viewerMsg"></div>
+      <div class="viewer-state" id="viewerState" hidden>
+        <div class="vs-icon" id="vsIcon"></div>
+        <div class="vs-title" id="vsTitle"></div>
+        <div class="vs-text" id="vsText"></div>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -136,16 +141,22 @@
   <section>
     <h3>Görüntü kaynağı</h3>
     <div class="grid3">
-      <label>Tür<select id="srcType"><option value="device">Capture card</option><option value="file">Video dosyası</option><option value="demo">Demo (sentetik)</option></select></label>
-      <label>Cihaz no<span class="row"><input id="srcIndex" type="number" min="0" value="0"><button id="btnProbe" type="button" class="ghost">Tara</button></span></label>
-      <label>Dosya yolu<input id="srcPath" placeholder="/yol/video.mp4"></label>
-      <label>Genişlik<input id="srcW" type="number" value="1920"></label>
-      <label>Yükseklik<input id="srcH" type="number" value="1080"></label>
-      <label>Format (FourCC)<select id="srcFourcc"><option value="">Otomatik</option><option>YUY2</option><option>NV12</option><option>MJPG</option></select></label>
+      <label>Tür<select id="srcType">
+        <option value="auto">Otomatik – capture card (önerilen)</option>
+        <option value="device">Elle cihaz numarası</option>
+        <option value="file">Video dosyası</option>
+        <option value="demo">Demo (sentetik)</option></select></label>
+      <label class="src-device">Cihaz no<input id="srcIndex" type="number" min="0" value="0"></label>
+      <label class="src-file">Dosya yolu<input id="srcPath" placeholder="/yol/video.mp4"></label>
+      <label>Format<select id="srcFourcc"><option value="auto">Otomatik (en iyisi denenir)</option><option>YUY2</option><option>NV12</option><option>MJPG</option></select></label>
+      <label class="src-manual">Genişlik<input id="srcW" type="number" value="1920"></label>
+      <label class="src-manual">Yükseklik<input id="srcH" type="number" value="1080"></label>
     </div>
-    <div class="probe" id="probeOut"></div>
     <div class="row end"><button id="btnSrcApply" type="button" class="primary">Uygula</button></div>
-    <p class="muted">Sıkıştırmasız format (YUY2/NV12) önerilir; MJPG artefaktı ince ekojenik odakları bozabilir.</p>
+    <div class="dev-head"><b>Bulunan video cihazları</b><button id="btnProbe" type="button" class="ghost">Yenile</button></div>
+    <div class="dev-list" id="devList"><span class="muted">Yükleniyor…</span></div>
+    <p class="muted">Otomatik modda capture card takıldığı anda bağlanılır, çıkarılınca beklenir. Dahili kameralar seçilmez. Sıkıştırmasız format (YUY2/NV12) önceliklidir; kart yalnızca MJPG verebiliyorsa uyarı gösterilir.</p>
+    <details class="dev-log"><summary>Bağlantı günlüğü</summary><pre id="devLog"></pre></details>
   </section>
 
   <section>

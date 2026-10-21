@@ -12,9 +12,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8765},
-    # type: "device" (capture card), "file" (video dosyası), "demo"
-    "source": {"type": "demo", "index": 0, "path": "", "width": 1920,
-               "height": 1080, "fps": 30, "fourcc": ""},
+    # type: "auto" (capture card'ı kendisi bulur, tak-çıkar), "device"
+    # (elle indeks), "file" (video dosyası), "demo" (sentetik)
+    "source": {"type": "auto", "index": 0, "path": "", "width": 1920,
+               "height": 1080, "fps": 60, "fourcc": "auto",
+               "device_name": "",      # tercih edilen cihaz (boş: otomatik)
+               "ignore": [],            # otomatik seçimde yok sayılan cihazlar
+               "negotiated": {}},       # cihaz adı -> bulunan en iyi mod
     # Görüntü alanı (normalize x, y, w, h). Model yalnızca burayı görür.
     "roi": None,
     # Kayıtlarda ve akışta siyaha boyanan alanlar (hasta adı vb.)
@@ -22,7 +26,7 @@ DEFAULTS: dict = {
     "calibration": {"mm_per_px": None, "active_preset": None, "presets": {}},
     "model": {
         "backend": "auto",          # auto | torch | onnx | demo | none
-        "path": "models/unetpp.pth",
+        "path": "models/unetpp.onnx",   # yoksa aynı adlı .pth denenir
         "encoder": "resnet34",      # eğitimdeki smp encoder adı
         "in_channels": 3,
         "classes": 1,
