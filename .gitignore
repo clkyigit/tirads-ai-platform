@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+.env
+
+# Büyük Model Ağırlıkları
+*.pth
+*.onnx
+*.weights
+
+# İşletim Sistemi
+.DS_Store
+Thumbs.db
