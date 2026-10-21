@@ -1,0 +1,6 @@
+# PyTorch (.pth) UNet++ modelleri için.
+# Ekran kartı (CUDA) kullanacaksanız torch'u ÖNCE https://pytorch.org adresindeki
+# komutla kurun (ör. pip install torch --index-url https://download.pytorch.org/whl/cu124),
+# sonra bu dosyayı kurun. Aksi halde CPU sürümü kurulur.
+torch>=2.1
+segmentation-models-pytorch>=0.3.3

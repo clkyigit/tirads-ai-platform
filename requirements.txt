@@ -1,5 +1,8 @@
-opencv-python>=4.8.0
-numpy>=1.24.0
-streamlit>=1.28.0
-torch>=2.0.0
-torchvision>=0.15.0
+# Çekirdek (Linux + Windows). ONNX modelleri doğrudan çalışır.
+starlette>=0.37
+uvicorn>=0.29
+numpy>=1.24
+opencv-python>=4.8
+onnxruntime>=1.17
+# DICOM görüntü yükleme (opsiyonel ama önerilir)
+pydicom>=2.4

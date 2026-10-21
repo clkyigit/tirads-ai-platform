@@ -13,3 +13,10 @@ env/
 # İşletim Sistemi
 .DS_Store
 Thumbs.db
+
+# Uygulama verisi (vakalar, kişisel ayarlar) ve model ağırlıkları
+data/
+models/*
+!models/README.md
+*.pt
+.venv/
