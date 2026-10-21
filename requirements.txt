@@ -2,7 +2,7 @@
 starlette>=0.37
 uvicorn>=0.29
 numpy>=1.24
-opencv-python>=4.8
+opencv-python-headless>=4.8   # GUI kütüphanesi (libGL) gerektirmez
 onnxruntime>=1.17
 # DICOM görüntü yükleme (opsiyonel ama önerilir)
 pydicom>=2.4
