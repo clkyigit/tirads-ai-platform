@@ -15,13 +15,17 @@
     <span class="chip" id="chipModel" title="Segmentasyon modeli">Model: –</span>
     <span class="chip" id="chipCal" title="Kalibrasyon (mm/piksel)">Kalibrasyon: –</span>
   </div>
+  <div class="mode-switch" role="group" aria-label="Çalışma modu">
+    <button id="modeClinical" class="active">Klinik</button>
+    <button id="modeAnnot">Etiketleme</button>
+  </div>
   <div class="top-actions">
-    <button id="btnCases" class="ghost">Vakalar</button>
+    <button id="btnCases" class="ghost clinical-only">Vakalar</button>
     <button id="btnSettings" class="ghost">Ayarlar</button>
   </div>
 </header>
 
-<div class="research-banner">Araştırma amaçlı karar destek yazılımıdır. Tüm ölçüm ve kategoriler radyolog tarafından onaylanmalıdır.</div>
+<div class="research-banner"><span class="clinical-only">Araştırma amaçlı karar destek yazılımıdır. Tüm ölçüm ve kategoriler radyolog tarafından onaylanmalıdır.</span><span class="annot-only">Etiketleme modu: kayıtlar eğitim veri setine gider. Hasta adı değil, takma kod kullanın.</span></div>
 
 <main class="layout">
   <section class="viewer-col">
@@ -48,7 +52,8 @@
         <button data-tool="width">Genişlik <kbd>W</kbd></button>
         <button data-tool="ap">AP <kbd>H</kbd></button>
         <button data-tool="length">Uzunluk <kbd>L</kbd></button>
-        <button data-tool="draw" title="Noktalarla sınır çizin, ilk noktaya tıklayarak kapatın">Elle çiz <kbd>D</kbd></button>
+        <button data-tool="draw" title="Basılı tutup sınırı çizin ya da noktalarla tıklayın">Elle çiz <kbd>D</kbd></button>
+        <button data-tool="edit" title="Konturu tutup sürükleyerek düzeltin">Düzenle <kbd>E</kbd></button>
         <button id="btnClearView" class="ghost" title="Bu görünümdeki kontur ve ölçümleri sil">Temizle</button>
       </div>
     </div>
@@ -72,7 +77,27 @@
       <form id="tiradsForm" autocomplete="off"></form>
     </div>
 
-    <div class="card result" id="resultCard">
+    <div class="card annot-only">
+      <h2>Etiket</h2>
+      <div class="grid2">
+        <label>Hasta takma kodu<input id="annPatient" placeholder="ör. P0001" autocomplete="off"></label>
+        <label>Nodül<span class="row"><input id="annNodule" value="N1" autocomplete="off"><button id="btnNextNodule" type="button" class="ghost" title="Aynı hastada sonraki nodül">+</button></span></label>
+      </div>
+      <label>Etiketleyen<input id="annotator" placeholder="Ad Soyad"></label>
+      <label class="check"><input type="checkbox" id="annNegative"> Bu karede nodül yok (negatif örnek)</label>
+      <div class="muted" id="annHint">Kesit: <b id="annView">Transvers</b> · TI-RADS formu isteğe bağlı (doldurulursa birlikte kaydedilir).</div>
+      <div class="row end">
+        <button id="btnAnnSave" class="primary">Etiketi kaydet <kbd>S</kbd></button>
+      </div>
+      <div class="ds-stats" id="dsStats"></div>
+      <details class="ds-recent"><summary>Son kayıtlar</summary><div id="dsRecent"></div></details>
+      <div class="row end">
+        <button id="btnExport" type="button" class="ghost">Eğitim için dışa aktar</button>
+      </div>
+      <div class="muted" id="exportOut"></div>
+    </div>
+
+    <div class="card result clinical-only" id="resultCard">
       <div class="result-head">
         <div class="tr" id="trLevel">TR –</div>
         <div class="pts"><span id="trPoints">–</span> puan</div>
@@ -82,7 +107,7 @@
       <div class="notes" id="scoreNotes"></div>
     </div>
 
-    <div class="card">
+    <div class="card clinical-only">
       <h2>Kaydet</h2>
       <div class="grid2">
         <label>Çalışma / protokol no<input id="studyNo" placeholder="Hasta adı girmeyin"></label>

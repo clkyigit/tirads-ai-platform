@@ -16,6 +16,7 @@ kırpılır, çıkan maske tam kare koordinatlarına geri yerleştirilir.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -44,6 +45,7 @@ class Segmenter:
         self._model = None
         self._sess = None
         self._input_name = None
+        self.sidecar: dict = {}
         try:
             self._load()
         except Exception as e:  # yükleme hatası uygulamayı durdurmasın
@@ -68,6 +70,7 @@ class Segmenter:
             self.error = (f"Model dosyası bulunamadı: {p}. Ağırlıkları bu yola "
                           "koyun ya da ayarlardan yolu değiştirin.")
             return
+        self._apply_sidecar(p)
         if kind == "auto":
             kind = "onnx" if p.suffix.lower() == ".onnx" else "torch"
         if kind == "onnx":
@@ -76,6 +79,27 @@ class Segmenter:
             self._load_torch(p)
         else:
             raise SegmenterError(f"Bilinmeyen model.backend: {kind}")
+
+    SIDECAR_KEYS = ("encoder", "in_channels", "classes", "nodule_class",
+                    "input_size", "normalize", "output_activation", "threshold")
+
+    def _apply_sidecar(self, p: Path):
+        """Eğitim scriptinin model dosyasının yanına yazdığı <ad>.json:
+        ön işleme ayarlarını eğitimdekiyle birebir aynı yapar."""
+        side = p.with_suffix(".json")
+        if not side.exists():
+            return
+        try:
+            meta = json.loads(side.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Model yan dosyası okunamadı: %s", e)
+            return
+        for k in self.SIDECAR_KEYS:
+            if k in meta:
+                self.cfg[k] = meta[k]
+        self.sidecar = {k: meta.get(k) for k in ("trained_at", "val_dice",
+                                                  "val_size_err_mm", "n_train")
+                        if k in meta}
 
     def _load_onnx(self, p: Path):
         import onnxruntime as ort
@@ -155,7 +179,10 @@ class Segmenter:
                 "path": self.cfg.get("path"),
                 "encoder": self.cfg.get("encoder"),
                 "input_size": self.cfg.get("input_size"),
-                "is_demo": self.backend == "demo"}
+                "is_demo": self.backend == "demo",
+                "trained": self.sidecar,
+                "normalize": self.cfg.get("normalize"),
+                "threshold": self.cfg.get("threshold")}
 
     def _preprocess(self, img_bgr: np.ndarray) -> np.ndarray:
         w, h = self.cfg.get("input_size") or [512, 512]

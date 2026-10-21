@@ -64,8 +64,63 @@ Tarayıcı otomatik açılır: <http://127.0.0.1:8765>. Varsayılan olarak yaln�
 | 1 / 2 | Transvers / Longitudinal |
 | A | AI segmentasyon (nodüle tıkla) |
 | W / H / L | Genişlik / AP / Uzunluk kumpası |
-| D | Elle kontur (Enter veya ilk noktaya tıklayarak kapat) |
+| D | Elle kontur (basılı tutup çiz ya da tıkla; Enter/ilk nokta ile kapat) |
+| E | Konturu sürükleyerek düzelt |
+| S | Etiketi kaydet (etiketleme modunda) |
 | Esc | Aracı bırak |
+
+## Veri toplama ve model eğitimi
+
+Model henüz yoksa önce veri toplanır. Etiketleme de bu uygulamada yapılır. Böylece eğitim görüntüleri, modelin kullanımda göreceği capture görüntüleriyle aynı yoldan gelir (aynı capture card, aynı format, aynı ROI).
+
+### 1. Etiketleme (üst menü → **Etiketleme**)
+
+1. **Hasta takma kodu** (ör. `P0001`) ve **Etiketleyen** girin, Enter'a basın. Hasta adı ya da TC kimlik no girmeyin. Takma kod ile gerçek hasta eşleşmesini ayrı ve güvenli bir listede tutun.
+2. Nodülü ekrana getirin → **Space** (dondur).
+3. **D** ile konturu çizin: fareyi basılı tutup sınır boyunca dolaşın, bırakınca kontur kapanır. İsterseniz nokta nokta tıklayarak da çizebilirsiniz.
+4. Gerekirse **E** ile düzeltin: konturu tutup sürükleyin, yakın noktalar yumuşakça birlikte hareket eder.
+5. **S** ile kaydedin. Görüntü otomatik olarak canlıya döner, aynı nodülün bir sonraki karesine geçebilirsiniz.
+6. **2** ile longitudinal kesite geçip aynı adımları tekrarlayın. Aynı hastadaki diğer nodül için **+** (N2, N3...) kullanın.
+7. Nodül olmayan kareleri **"nodül yok (negatif örnek)"** ile kaydedin. Bu, modelin yanlış pozitiflerini azaltır.
+
+TI-RADS formu isteğe bağlıdır; doldurulursa etiketle birlikte saklanır ve ileride özellik sınıflayıcıları için kullanılır.
+
+İpuçları:
+- Aynı nodülden farklı açılardan birkaç kare kaydedin; çeşitlilik modeli güçlendirir. Bölme hasta düzeyinde yapıldığı için bu durum sızıntıya yol açmaz.
+- Cihaz ayarlarını (preset, SRI/compound, frekans) standart tutun ya da bilinçli olarak çeşitlendirin, ama kaydını tutun.
+- Bir alt kümeyi ikinci bir radyolog bağımsız etiketlesin. Gözlemciler arası uyum, modelin ulaşabileceği tavanı gösterir.
+- Model devreye girdikten sonra da etiketlemeye devam edin. AI konturu düzelttiğinizde hem düzeltilmemiş AI maskesi (`mask_ai.png`) hem son maske saklanır, panelde AI–radyolog Dice ortalaması görünür.
+
+Kayıtlar `data/dataset/<hasta>/<nodül>/<etiket>/` altında tutulur: `image.png`, `mask.png`, `mask_ai.png` (varsa) ve `meta.json` (ROI, mm/px, cihaz bilgisi, TI-RADS, etiketleyen). Yanlış bir kayıt "Son kayıtlar" listesinden silinebilir; dosya silinmez, işaretlenip eğitimden çıkarılır.
+
+### 2. Dışa aktarma
+
+Paneldeki **Eğitim için dışa aktar** düğmesi ya da:
+```bash
+python -m tools.export_dataset             # data/dataset -> data/export
+python -m tools.export_dataset --nnunet 501   # + nnU-Net v2 klasörü
+```
+- Görüntüler ROI'ye kırpılır (uygulama çıkarımda da yalnızca ROI'yi kullanır).
+- Bölme **hasta düzeyindedir**: %70 eğitim, %15 doğrulama, %15 test.
+- Sonraki aktarımlarda önceki bölme korunur; yeni hastalar eğitime eklenir, **test seti değişmez**.
+
+### 3. Eğitim (GPU'lu makinede)
+
+```bash
+pip install -r requirements-ml.txt      # CUDA için önce torch'u pytorch.org'dan kurun
+python -m tools.train_unetpp --data data/export --out models
+```
+- UNet++ (ResNet34 encoder, ImageNet ön eğitimli), Dice + BCE kaybı. Artırmalar: çevirme, ±10° dönme, ölçek, parlaklık/kontrast/gama, benek gürültüsü. Dikey çevirme yapılmaz, çünkü derinlik yönü anlamlıdır.
+- Her epoch'ta doğrulama setinde, uygulamadaki gibi "nodüle tıklama" ile **Dice** ve **mm cinsinden boyut hatası** ölçülür. En iyi model kaydedilir; iyileşme durunca eğitim kendiliğinden biter.
+- Çıktılar: `models/unetpp.pth`, `models/unetpp.onnx` ve `models/unetpp.json`. JSON dosyası ön işleme ayarlarını içerir ve uygulama tarafından otomatik okunur; elle ayar girmeye gerek kalmaz.
+- Uygulamada **Ayarlar → Segmentasyon modeli → yol: `models/unetpp.onnx` → Modeli yükle**.
+- Test setine yalnızca en sonda, bir kez bakın:
+  ```bash
+  python -m tools.train_unetpp --data data/export --out models --eval-test
+  ```
+- İnternetsiz makinede `--encoder-weights none` kullanın ya da ağırlıkları önceden indirin.
+
+Kabaca hedefler: ilk deneme için 100–150 hastada 300+ görüntü; boyut hatası 1–2 mm'nin altına indiğinde biyopsi eşikleri açısından anlamlı hale gelir.
 
 ## Model (UNet++)
 
@@ -97,7 +152,11 @@ backend/
   tirads.py        ACR TI-RADS puanlama ve boyut eşikleri (tek doğruluk kaynağı)
   storage.py       Vaka kaydı ve rapor
   config.py        data/config.json
+  dataset.py       Etiket kaydı, istatistik, hasta düzeyinde dışa aktarma
 frontend/          index.html, app.js, style.css (internet gerektirmez)
+tools/
+  export_dataset.py  Etiketleri eğitim formatına aktarır (+ nnU-Net v2)
+  train_unetpp.py    UNet++ eğitimi, değerlendirme, ONNX + json çıktısı
 models/            Model ağırlıkları (git'e eklenmez)
 data/              Ayarlar ve vakalar (git'e eklenmez)
 tests/             python -m unittest discover -s tests -t .

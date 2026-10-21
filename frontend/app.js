@@ -310,15 +310,17 @@ function draw() {
 function setTool(t) {
   if (t && !cur().frameId) { toast("Önce görüntüyü dondurun."); return; }
   S.tool = S.tool === t ? null : t;
-  S.poly = null; S.drag = null;
+  S.poly = null; S.drag = null; S.free = null; S.edit = null;
   if (S.tool !== "calib") S.calibPts = null;
+  if (S.tool === "edit" && !cur().contour) { toast("Düzenlenecek kontur yok."); S.tool = null; }
   document.querySelectorAll("#tools button[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === S.tool));
   const hints = {
     ai: "Nodülün içine tıklayın; model o noktadaki nodülü segmente eder.",
     width: "Transvers çapı çizin: tıklayıp sürükleyin.",
     ap: "Ön-arka (AP) çapı çizin: tıklayıp sürükleyin.",
     length: "Longitudinal uzunluğu çizin: tıklayıp sürükleyin.",
-    draw: "Sınır boyunca tıklayın; kapatmak için ilk noktaya tıklayın ya da Enter. Esc iptal.",
+    draw: "Basılı tutup sınırı çizin (bırakınca kapanır) ya da noktalarla tıklayıp ilk noktaya tıklayın / Enter. Esc iptal.",
+    edit: "Konturu tutup sürükleyin; yakın noktalar yumuşakça birlikte hareket eder.",
     calib: "Derinlik skalasında iki çentiğe tıklayın.",
     roi: "Model için görüntü alanını sürükleyerek seçin (menü/yazılar dışarıda kalsın).",
     privacy: "Hasta bilgisi alanını sürükleyerek seçin; kayıt ve akışta siyaha boyanır.",
@@ -327,18 +329,71 @@ function setTool(t) {
   draw();
 }
 
+// Konturu eşit aralıklı noktalara böl (düzenleme yumuşak olsun)
+function resample(c, step) {
+  const out = [];
+  for (let i = 0; i < c.length; i++) {
+    const a = c[i], b = c[(i + 1) % c.length];
+    const k = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / step));
+    for (let j = 0; j < k; j++) out.push([a[0] + (b[0] - a[0]) * j / k, a[1] + (b[1] - a[1]) * j / k]);
+  }
+  return out;
+}
+const EDIT_RADIUS = 28;  // ekran pikseli
+
 cv.addEventListener("mousedown", (ev) => {
   if (ev.button !== 0 || !S.tool) return;
   const p = toImg(ev);
   if (["width", "ap", "length"].includes(S.tool)) S.drag = { kind: "line", start: p, end: p };
   else if (["roi", "privacy"].includes(S.tool)) S.drag = { kind: "rect", start: p, end: p };
+  else if (S.tool === "draw" && !(S.poly && S.poly.length)) S.free = { pts: [p], moved: false };
+  else if (S.tool === "edit" && cur().contour) {
+    const dpr = T.dpr || 1, q = toCv(p);
+    const pts = resample(cur().contour, 3);
+    let best = -1, bd = Infinity;
+    pts.forEach((c, i) => { const r = toCv(c), d = Math.hypot(r[0] - q[0], r[1] - q[1]); if (d < bd) { bd = d; best = i; } });
+    if (bd > EDIT_RADIUS * dpr) return;
+    cur().contour = pts;
+    S.edit = { orig: pts.map((c) => c.slice()), grab: pts[best].slice(), start: p };
+  }
 });
 cv.addEventListener("mousemove", (ev) => {
   const p = toImg(ev);
   if (S.drag) { S.drag.end = p; draw(); }
+  else if (S.free && (ev.buttons & 1)) {
+    const last = S.free.pts[S.free.pts.length - 1];
+    if (Math.hypot(p[0] - last[0], p[1] - last[1]) * T.s >= 3 * (T.dpr || 1)) {
+      S.free.pts.push(p);
+      if (S.free.pts.length > 4) S.free.moved = true;
+      S.poly = S.free.pts; draw();
+    }
+  }
+  else if (S.edit && (ev.buttons & 1)) {
+    const dx = p[0] - S.edit.start[0], dy = p[1] - S.edit.start[1];
+    const R = EDIT_RADIUS * (T.dpr || 1) / T.s, g = S.edit.grab;
+    cur().contour = S.edit.orig.map((c) => {
+      const w = Math.exp(-((c[0] - g[0]) ** 2 + (c[1] - g[1]) ** 2) / (R * R));
+      return [c[0] + w * dx, c[1] + w * dy];
+    });
+    draw();
+  }
   else if (S.poly) { S.poly.hover = p; draw(); }
 });
 window.addEventListener("mouseup", async (ev) => {
+  if (S.free) {
+    const f = S.free; S.free = null;
+    if (f.moved && f.pts.length >= 8) {
+      S.suppressClick = true; S.poly = null;
+      await applyContour(f.pts.map((q) => q.map(Math.round)), "manual");
+      setTool(null);
+    } else if (S.poly === f.pts) S.poly = null;
+    return;
+  }
+  if (S.edit) {
+    S.edit = null;
+    await applyContour(cur().contour.map((q) => q.map(Math.round)), "edit");
+    return;
+  }
   if (!S.drag) return;
   const d = S.drag; S.drag = null;
   const v = cur();
@@ -364,6 +419,7 @@ window.addEventListener("mouseup", async (ev) => {
   }
 });
 cv.addEventListener("click", async (ev) => {
+  if (S.suppressClick) { S.suppressClick = false; return; }
   const p = toImg(ev);
   if (S.tool === "ai") return runSegment(p);
   if (S.tool === "draw") {
@@ -406,7 +462,8 @@ async function applyContour(contour, how) {
   try {
     const r = await api("/api/contour", { json: { frame_id: v.frameId, contour } });
     v.contour = contour;
-    v.ai = how === "manual" ? { backend: "manuel", edited: true } : v.ai;
+    if (how === "manual") v.ai = { backend: "manuel", edited: true };
+    else if (how === "edit") v.ai = v.ai ? { ...v.ai, edited: true } : { backend: "manuel", edited: true };
     autoLines(v, r.metrics_px);
     renderAiInfo(); draw(); renderDims(); markDots();
   } catch (e) { toast(e.message, true); }
@@ -490,6 +547,7 @@ function clearViewData(view, dropFrame) {
 function switchView(view) {
   S.view = view;
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === view));
+  $("annView").textContent = VIEW_TR[view];
   const frozen = !!cur().frameId;
   setLiveMode(!frozen);
   fit();
@@ -555,6 +613,90 @@ function resetAll() {
   $("report").hidden = true;
   $("tag_shape").textContent = "";
   switchView("transverse"); renderAiInfo(); renderDims(); markDots();
+}
+
+// ------------------------------------------------------- etiketleme modu
+const VIEW_TR = { transverse: "Transvers", longitudinal: "Longitudinal" };
+
+function setMode(m) {
+  S.mode = m;
+  document.body.classList.toggle("mode-annot", m === "annot");
+  $("modeClinical").classList.toggle("active", m !== "annot");
+  $("modeAnnot").classList.toggle("active", m === "annot");
+  $("viewerBadge").dataset.mode = m;
+  store("mode", m);
+  if (m === "annot") refreshDataset();
+}
+
+async function refreshDataset() {
+  try {
+    const r = await api("/api/dataset");
+    const st = r.stats;
+    const v = st.views || {};
+    $("dsStats").innerHTML =
+      `Veri seti: <b>${st.images}</b> görüntü · <b>${st.patients}</b> hasta · <b>${st.nodules}</b> nodül` +
+      `<br>Transvers ${v.transverse || 0} · Longitudinal ${v.longitudinal || 0} · Negatif ${st.negatives}` +
+      (st.ai_vs_final_dice_mean != null ? `<br>AI–radyolog uyumu (Dice): <b>${st.ai_vs_final_dice_mean.toFixed(3)}</b> (${st.with_ai} görüntü)` : "");
+    const box = $("dsRecent"); box.innerHTML = "";
+    for (const it of r.recent) {
+      const row = document.createElement("div"); row.className = "item";
+      row.innerHTML = `<span>${it.path.split("/").slice(0, 2).join(" / ")} · ${VIEW_TR[it.view] || it.view}${it.negative ? " · negatif" : ""}</span>`;
+      const del = document.createElement("button"); del.type = "button"; del.className = "ghost"; del.textContent = "Sil";
+      del.onclick = async () => {
+        if (!confirm("Bu etiket veri setinden çıkarılsın mı? (Dosya silinmez, işaretlenir.)")) return;
+        try { await api("/api/dataset/delete", { json: { path: it.path } }); refreshDataset(); } catch (e) { toast(e.message, true); }
+      };
+      row.appendChild(del); box.appendChild(row);
+    }
+    if (!r.recent.length) box.innerHTML = '<span class="muted">Henüz kayıt yok.</span>';
+  } catch (e) { $("dsStats").textContent = e.message; }
+}
+
+async function saveAnnotation() {
+  const v = cur();
+  if (!v.frameId) return toast("Önce görüntüyü dondurun.");
+  const negative = $("annNegative").checked;
+  if (!negative && !v.contour) return toast("Konturu çizin ya da 'nodül yok' işaretleyin.", true);
+  const patient = $("annPatient").value.trim(), annotator = $("annotator").value.trim();
+  if (!patient) { $("annPatient").focus(); return toast("Hasta takma kodu gerekli.", true); }
+  if (!annotator) { $("annotator").focus(); return toast("Etiketleyen adı gerekli.", true); }
+  const f = features();
+  const hasF = Object.values(f).some((x) => (Array.isArray(x) ? x.length : x));
+  const d = currentDims();
+  $("btnAnnSave").disabled = true;
+  try {
+    const r = await api("/api/annotations", { json: {
+      frame_id: v.frameId, patient_id: patient, nodule_id: $("annNodule").value.trim() || "N1",
+      view: S.view, annotator, negative, features: hasF ? f : null,
+      measurements: { width_mm: d.width, ap_mm: d.ap, length_mm: d.length },
+    } });
+    store("annotator", annotator);
+    toast(`Kaydedildi: ${r.path.split("/").slice(0, 2).join(" / ")} · ${VIEW_TR[S.view]} (toplam ${r.stats.images})`);
+    $("annNegative").checked = false;
+    clearViewData(S.view, true);
+    setLiveMode(true); setTool(null);
+    refreshDataset();
+  } catch (e) { toast(e.message, true); }
+  finally { $("btnAnnSave").disabled = false; }
+}
+
+function nextNodule() {
+  const m = /^(.*?)(\d+)$/.exec($("annNodule").value.trim());
+  $("annNodule").value = m ? m[1] + (parseInt(m[2], 10) + 1) : "N2";
+  VIEWS.forEach((k) => (S.views[k] = emptyView()));
+  S.manualDims = {}; S.shapeTouched = false;
+  $("tiradsForm").reset(); $("tag_shape").textContent = "";
+  switchView("transverse"); renderAiInfo(); renderDims(); markDots();
+  toast(`Nodül: ${$("annNodule").value}`);
+}
+
+async function exportDataset() {
+  if (!confirm("Etiketler eğitim formatına aktarılsın mı? (data/export klasörü yeniden oluşturulur; önceki hasta bölmesi korunur.)")) return;
+  $("exportOut").textContent = "Aktarılıyor…";
+  try {
+    const r = await api("/api/dataset/export", { json: { nnunet_id: 501 } });
+    $("exportOut").textContent = `${r.images} görüntü → ${r.path} · eğitim ${r.by_split.train || 0} / doğrulama ${r.by_split.val || 0} / test ${r.by_split.test || 0} (hasta: ${r.patients.train}/${r.patients.val}/${r.patients.test})`;
+  } catch (e) { $("exportOut").textContent = e.message; }
 }
 
 // ------------------------------------------------------------ ayarlar
@@ -662,6 +804,18 @@ async function init() {
   if (!S.status) { setTimeout(init, 2000); return; }
   buildForm(S.status.lexicon);
   bindSettings();
+  $("modeClinical").onclick = () => setMode("clinical");
+  $("modeAnnot").onclick = () => setMode("annot");
+  $("btnAnnSave").onclick = saveAnnotation;
+  $("btnNextNodule").onclick = nextNodule;
+  $("btnExport").onclick = exportDataset;
+  $("annotator").value = load("annotator") || "";
+  $("annPatient").addEventListener("change", () => { $("annNodule").value = "N1"; });
+  // Etiket alanlarında Enter: odağı bırak, kısayollar (Space/S) hemen çalışsın
+  ["annPatient", "annNodule", "annotator", "studyNo", "radiologist"].forEach((id) =>
+    $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } }));
+  $("viewer").addEventListener("mousedown", () => document.activeElement?.blur?.());
+  setMode(load("mode") === "annot" ? "annot" : "clinical");
   $("radiologist").value = load("radiologist") || "";
 
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => switchView(t.dataset.view)));
@@ -681,7 +835,8 @@ async function init() {
     if (e.target.matches('input:not([type="radio"]):not([type="checkbox"]), textarea, select') ||
         document.querySelector("dialog[open]") || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
-    const map = { a: "ai", w: "width", h: "ap", l: "length", d: "draw" };
+    const map = { a: "ai", w: "width", h: "ap", l: "length", d: "draw", e: "edit" };
+    if (k === "s" && S.mode === "annot") { e.preventDefault(); return saveAnnotation(); }
     if (e.code === "Space") { e.preventDefault(); e.target.blur?.(); freezeToggle(); }
     else if (k === "1") switchView("transverse");
     else if (k === "2") switchView("longitudinal");

@@ -2,5 +2,5 @@
 # Ekran kartı (CUDA) kullanacaksanız torch'u ÖNCE https://pytorch.org adresindeki
 # komutla kurun (ör. pip install torch --index-url https://download.pytorch.org/whl/cu124),
 # sonra bu dosyayı kurun. Aksi halde CPU sürümü kurulur.
-torch>=2.1
+torch>=2.3
 segmentation-models-pytorch>=0.3.3

@@ -7,6 +7,7 @@ import contextlib
 import re
 import logging
 import secrets
+import shutil
 import threading
 import time
 from collections import OrderedDict
@@ -22,7 +23,7 @@ from starlette.responses import (FileResponse, JSONResponse, Response,
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import measure, storage, tirads
+from . import dataset, measure, storage, tirads
 from .capture import CaptureManager, probe_devices
 from .config import ROOT, Config
 from .segmentation import Segmenter
@@ -66,8 +67,9 @@ class State:
         fid = secrets.token_hex(6)
         img = apply_privacy(img, self.cfg.get()["privacy_masks"])
         with self.frames_lock:
-            self.frames[fid] = {"image": img, "mask": None, "origin": origin,
-                                "ai": None, "ts": time.time()}
+            self.frames[fid] = {"image": img, "mask": None, "ai_mask": None,
+                                "origin": origin, "ai": None,
+                                "ts": time.time()}
             while len(self.frames) > MAX_FRAMES:
                 self.frames.popitem(last=False)
         return {"frame_id": fid, "width": img.shape[1], "height": img.shape[0]}
@@ -224,6 +226,7 @@ def create_app(config_path: Path | None = None, start_capture=True,
                                             "deneyin veya elle çizin."})
         contour = measure.mask_to_contour(r["mask"])
         fr["mask"] = r["mask"]
+        fr["ai_mask"] = r["mask"].copy()  # düzeltilmemiş hali (veri döngüsü)
         fr["ai"] = {"backend": seg.backend, "confidence": r["confidence"],
                     "edited": False}
         mmpp = st.cfg.get()["calibration"]["mm_per_px"]
@@ -395,6 +398,86 @@ def create_app(config_path: Path | None = None, start_capture=True,
                              "report": storage.build_report(case),
                              "recommendation": rec, "score": s})
 
+    def ds_root() -> Path:
+        return st.cfg.data_dir() / "dataset"
+
+    async def annotation_save(req: Request):
+        b = await req.json()
+        try:
+            fr = st.get_frame(b.get("frame_id", ""))
+        except KeyError as e:
+            return _err(str(e), 404)
+        c = st.cfg.get()
+        H, W = fr["image"].shape[:2]
+        from .segmentation import roi_to_px
+        x0, y0, x1, y1 = roi_to_px(c["roi"], W, H)
+        feats = b.get("features") or {}
+        sc = tirads.score(feats) if feats else None
+        cap = st.capture.info()
+        meta = {
+            "patient_id": b.get("patient_id", ""),
+            "nodule_id": b.get("nodule_id", ""),
+            "view": b.get("view"),
+            "negative": bool(b.get("negative")),
+            "annotator": (b.get("annotator") or "").strip(),
+            "notes": (b.get("notes") or "").strip(),
+            "roi_px": [x0, y0, x1, y1],
+            "mm_per_px": c["calibration"]["mm_per_px"],
+            "calibration_preset": c["calibration"].get("active_preset"),
+            "source": fr["origin"],
+            "capture": {"backend": cap["backend"],
+                        "fourcc": cap["source"].get("fourcc"),
+                        "type": cap["source"].get("type")},
+            "ai": fr.get("ai"),
+            "features": feats,
+            "tirads": ({"total": sc["total"], "level": sc["level"]}
+                       if sc and sc.get("level") else None),
+            "measurements": b.get("measurements") or {},
+        }
+        if not meta["annotator"]:
+            return _err("Etiketleyen adı gerekli.")
+        try:
+            d = await run_in_threadpool(
+                dataset.save_annotation, ds_root(), image=fr["image"],
+                mask=fr["mask"], ai_mask=fr.get("ai_mask"), meta=meta)
+        except ValueError as e:
+            return _err(str(e))
+        rel = "/".join(d.parts[-3:])
+        return JSONResponse({"ok": True, "path": rel,
+                             "stats": dataset.stats(ds_root())})
+
+    async def dataset_stats(_):
+        return JSONResponse({"stats": dataset.stats(ds_root()),
+                             "recent": dataset.recent(ds_root())})
+
+    async def dataset_delete(req: Request):
+        b = await req.json()
+        try:
+            ok = dataset.mark_deleted(ds_root(), b.get("path", ""))
+        except ValueError as e:
+            return _err(str(e))
+        if not ok:
+            return _err("Etiket bulunamadı", 404)
+        return JSONResponse({"ok": True, "stats": dataset.stats(ds_root())})
+
+    async def dataset_export(req: Request):
+        b = await req.json()
+        out = st.cfg.data_dir() / "export"
+        split_file = out / "splits.json"
+        keep = None
+        if b.get("keep_splits", True) and split_file.exists():
+            keep = st.cfg.data_dir() / "splits_prev.json"
+            shutil.copy(split_file, keep)
+        try:
+            summary = await run_in_threadpool(
+                dataset.export, ds_root(), out,
+                val=float(b.get("val", 0.15)), test=float(b.get("test", 0.15)),
+                nnunet_id=b.get("nnunet_id"), split_file=keep)
+        except ValueError as e:
+            return _err(str(e))
+        summary["path"] = str(out)
+        return JSONResponse(summary)
+
     routes = [
         Route("/", index),
         Route("/api/status", status),
@@ -414,6 +497,10 @@ def create_app(config_path: Path | None = None, start_capture=True,
         Route("/api/cases", cases_list),
         Route("/api/cases", case_save, methods=["POST"]),
         Route("/api/cases/{cid}/report", case_get),
+        Route("/api/annotations", annotation_save, methods=["POST"]),
+        Route("/api/dataset", dataset_stats),
+        Route("/api/dataset/delete", dataset_delete, methods=["POST"]),
+        Route("/api/dataset/export", dataset_export, methods=["POST"]),
         Mount("/static", StaticFiles(directory=FRONTEND), name="static"),
     ]
 

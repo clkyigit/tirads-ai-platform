@@ -185,3 +185,17 @@ dialog h3 { margin: 0 0 8px; font-size: 14px; }
   .viewer { min-height: 55vh; }
   .grid3 { grid-template-columns: 1fr 1fr; }
 }
+
+/* Mod */
+.mode-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.mode-switch button { border: 0; border-radius: 0; background: transparent; }
+.mode-switch button.active { background: var(--accent); color: #031520; }
+body.mode-annot .clinical-only { display: none !important; }
+body:not(.mode-annot) .annot-only { display: none !important; }
+body.mode-annot .research-banner { color: var(--accent); background: #0c1f29; border-color: #163a4a; }
+.ds-stats { font-size: 12.5px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.ds-stats b { color: var(--text); }
+.ds-recent { font-size: 12.5px; margin: 6px 0; color: var(--muted); }
+.ds-recent summary { cursor: pointer; }
+.ds-recent .item { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.ds-recent .item button { padding: 1px 7px; font-size: 12px; }
