@@ -104,6 +104,25 @@
         <label>Çalışma no<input id="bxStudy" placeholder="Hasta adı girmeyin"></label>
       </div>
       <label class="check"><input type="checkbox" id="bxTrack" checked> Hedef dokuyla birlikte hareket etsin (solunum, prob)</label>
+      <div class="bx-session">
+        <div class="bx-sess-head">
+          <b>İşlem oturumu</b>
+          <button id="bxSess" type="button">İşlemi başlat <kbd>B</kbd></button>
+        </div>
+        <div class="bx-metrics bx-sess-metrics">
+          <div><span>Süre</span><b id="bxSDur">–</b></div>
+          <div><span>Uç görüntüde</span><b id="bxSView">–</b></div>
+          <div><span>Hedefe ulaşma</span><b id="bxSTgt">–</b></div>
+          <div><span>En yakın</span><b id="bxSMin">–</b></div>
+          <div><span>Rotada</span><b id="bxSOn">–</b></div>
+          <div><span>En büyük sapma</span><b id="bxSMiss">–</b></div>
+        </div>
+      </div>
+      <div class="bx-anat">
+        <label class="check"><input type="checkbox" id="bxAnat"> Canlı anatomi katmanı</label>
+        <div class="bx-legend" id="bxLegend"></div>
+        <div class="muted" id="bxAnatInfo"></div>
+      </div>
       <div class="row end"><button id="bxSnap" class="primary" type="button">İğne konumunu kaydet <kbd>F</kbd></button></div>
       <div class="muted" id="bxPerf"></div>
       <p class="muted bx-note">İğne, görüntü işlemeyle (model olmadan) algılanır; gecikmeli ya da hatalı olabilir. Rehber yalnızca yardımcıdır, iğneyi her zaman görüntüde gözle takip edin.</p>
@@ -132,6 +151,11 @@
         <label>Nodül<span class="row"><input id="annNodule" value="N1" autocomplete="off"><button id="btnNextNodule" type="button" class="ghost" title="Aynı hastada sonraki nodül">+</button></span></label>
       </div>
       <label>Etiketleyen<input id="annotator" placeholder="Ad Soyad"></label>
+      <div class="struct-pick">
+        <span class="muted">Çizilen yapı</span>
+        <div class="struct-btns" id="structBtns"></div>
+        <div class="muted struct-hint">Nodül zorunlu değil: yalnızca anatomi çizilmiş kareler "nodül yok" örneği olarak kaydedilir. Ölçümler nodülden alınır.</div>
+      </div>
       <label class="check"><input type="checkbox" id="annNegative"> Bu karede nodül yok (negatif örnek)</label>
       <div class="muted" id="annHint">Kesit: <b id="annView">Transvers</b> · TI-RADS formu isteğe bağlı (doldurulursa birlikte kaydedilir).</div>
       <div class="row end">

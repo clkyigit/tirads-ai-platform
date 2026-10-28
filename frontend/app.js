@@ -26,8 +26,45 @@ VIEWS.forEach((v) => (S.views[v] = emptyView()));
 
 function emptyView() {
   // aiContour: AI'ın ilk önerisi; confirmed: radyolog onayı; hist/fut: geri al/yinele
+  // slots: nodül dışı yapıların (tiroid, karotis, ...) kendi konturu ve geçmişi;
+  // etkin yapı v.contour vb. alanlara yüklenir (loaded).
   return { frameId: null, w: 0, h: 0, img: null, contour: null, ai: null, lines: {},
-           aiContour: null, confirmed: false, aiDice: null, hist: [], fut: [] };
+           aiContour: null, confirmed: false, aiDice: null, hist: [], fut: [],
+           slots: {}, loaded: 1 };
+}
+S.activeCls = 1;
+const SLOT_KEYS = ["contour", "ai", "aiContour", "confirmed", "aiDice", "hist", "fut"];
+const anatClass = (id) => (S.status?.anatomy || []).find((c) => c.id === +id);
+function ensureSlot(v, cls) {
+  if (!v || v.loaded === cls) return;
+  const save = {}; SLOT_KEYS.forEach((k) => (save[k] = v[k]));
+  v.slots[v.loaded] = save;
+  const next = v.slots[cls] || { contour: null, ai: null, aiContour: null, confirmed: false, aiDice: null, hist: [], fut: [] };
+  SLOT_KEYS.forEach((k) => (v[k] = next[k]));
+  delete v.slots[cls];
+  v.loaded = cls;
+}
+function setActiveCls(cls) {
+  S.activeCls = cls;
+  VIEWS.forEach((k) => ensureSlot(S.views[k], cls));
+  renderStructBtns();
+  if (cls !== 1 && S.tool === "ai") setTool(null);
+  renderContourBar(); draw();
+}
+function renderStructBtns() {
+  const box = $("structBtns");
+  if (!box || !S.status?.anatomy) return;
+  box.innerHTML = "";
+  for (const c of S.status.anatomy) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = c.id === S.activeCls ? "active" : "";
+    const v = cur();
+    const has = v.loaded === c.id ? !!v.contour : !!v.slots[c.id]?.contour;
+    b.innerHTML = `<i style="background:${c.color}"></i>${c.name}${has ? ' <span class="n">✓</span>' : ""}`;
+    b.onclick = () => setActiveCls(c.id);
+    box.appendChild(b);
+  }
 }
 const cur = () => S.views[S.view];
 const mmpp = () => S.status?.calibration?.mm_per_px || null;
@@ -301,8 +338,29 @@ function draw() {
   if (cfg.roi) rectN(cfg.roi, "rgba(54,179,224,.55)", [6, 4]);
   (cfg.privacy_masks || []).forEach((m) => rectN(m, "rgba(248,81,73,.6)", [2, 3]));
 
+  // Diğer yapılar (etkin olmayan slotlar) — ince, renkli
+  for (const [cid, sl] of Object.entries(v.slots || {})) {
+    if (!sl.contour?.length) continue;
+    const c = anatClass(cid);
+    ctx.save();
+    ctx.beginPath();
+    sl.contour.forEach((p, i) => { const q = toCv(p); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.closePath();
+    ctx.globalAlpha = 0.14; ctx.fillStyle = c?.color || "#888"; ctx.fill();
+    ctx.globalAlpha = 0.9; ctx.strokeStyle = c?.color || "#888"; ctx.lineWidth = 1.5 * dpr; ctx.stroke();
+    ctx.restore();
+  }
   // Kontur
-  if (v.contour?.length) {
+  if (v.contour?.length && v.loaded !== 1) {
+    const c = anatClass(v.loaded);
+    ctx.save();
+    ctx.beginPath();
+    v.contour.forEach((p, i) => { const q = toCv(p); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.closePath();
+    ctx.globalAlpha = 0.2; ctx.fillStyle = c?.color || "#888"; ctx.fill();
+    ctx.globalAlpha = 1; ctx.strokeStyle = c?.color || "#888"; ctx.lineWidth = 2.5 * dpr; ctx.stroke();
+    ctx.restore();
+  } else if (v.contour?.length) {
     const pending = isPending(v);
     ctx.save();
     ctx.beginPath();
@@ -559,7 +617,7 @@ async function applyContour(contour, how, { history = true, confirmed, before } 
   const prev = before || snap(v);
   const conf = confirmed !== undefined ? confirmed : how === "manual" ? true : how === "ai" ? false : prev.confirmed;
   try {
-    const r = await api("/api/contour", { json: { frame_id: v.frameId, contour, source: how, confirmed: conf } });
+    const r = await api("/api/contour", { json: { frame_id: v.frameId, contour, source: how, confirmed: conf, cls: v.loaded } });
     if (history) { v.hist.push(prev); if (v.hist.length > 60) v.hist.shift(); v.fut = []; }
     // AI önerisine dönüşte aynı nesne korunur (sonraki geri almalarda tanınsın)
     v.contour = how === "ai" && contour === v.aiContour ? v.aiContour : (r.contour || contour);
@@ -567,7 +625,7 @@ async function applyContour(contour, how, { history = true, confirmed, before } 
     v.aiDice = r.ai_dice ?? null;
     if (how === "manual") v.ai = v.aiContour ? { ...v.ai, edited: true, redrawn: true } : { backend: "manuel", edited: true };
     else if (how === "edit") v.ai = v.ai ? { ...v.ai, edited: true } : { backend: "manuel", edited: true };
-    autoLines(v, r.metrics_px);
+    if (v.loaded === 1 && r.metrics_px) autoLines(v, r.metrics_px);
     afterContourChange();
   } catch (e) { toast(e.message, true); v.contour = prev.contour; draw(); }
 }
@@ -580,7 +638,7 @@ function S_editOrig(i, before) {
 }
 
 function afterContourChange() {
-  renderAiInfo(); draw(); renderDims(); markDots(); renderContourBar();
+  renderAiInfo(); draw(); renderDims(); markDots(); renderContourBar(); renderStructBtns();
 }
 
 async function confirmContour() {
@@ -599,7 +657,7 @@ async function confirmContour() {
 async function restore(state) {
   const v = cur();
   if (!state.contour) {
-    await api("/api/contour", { json: { frame_id: v.frameId, contour: [] } });
+    await api("/api/contour", { json: { frame_id: v.frameId, contour: [], cls: v.loaded } });
     v.contour = null; v.confirmed = false; v.aiDice = null; v.ai = state.ai;
     for (const k of Object.keys(v.lines)) if (v.lines[k].source === "auto") delete v.lines[k];
     afterContourChange();
@@ -678,6 +736,13 @@ function renderContourBar() {
   const pending = isPending(v);
   bar.classList.toggle("pending", pending);
   const st = $("cbState");
+  if (v.loaded !== 1) {
+    st.textContent = `✓ ${anatClass(v.loaded)?.name || "Yapı"} çizildi`;
+    $("cbConfirm").hidden = true; $("cbAi").hidden = true;
+    $("cbUndo").disabled = !v.hist.length; $("cbRedo").disabled = !v.fut.length;
+    bar.querySelectorAll("[data-cb]").forEach((b) => b.classList.toggle("active", b.dataset.cb === S.tool));
+    return;
+  }
   if (pending) st.textContent = v.ai?.edited ? "AI önerisi (düzeltildi) · onay bekliyor" : "AI önerisi · kontrol edip onaylayın";
   else if (v.ai?.redrawn) st.textContent = "✓ Elle çizildi (AI önerisi yerine)";
   else if (v.aiContour) st.textContent = v.ai?.edited ? "✓ Düzeltildi ve onaylandı" : "✓ AI önerisi onaylandı";
@@ -702,6 +767,7 @@ function autoLines(v, m) {
 
 async function runSegment(p) {
   const v = cur();
+  if (v.loaded !== 1) return toast("AI segmentasyon nodül içindir; diğer yapıları elle çizin.");
   viewerMsg("Segmentasyon çalışıyor…");
   try {
     const r = await api("/api/segment", { json: { frame_id: v.frameId, click: p.map(Math.round) } });
@@ -746,6 +812,7 @@ async function loadFrame(view, info) {
   img.src = `/api/frame/${info.frame_id}.png`;
   await img.decode();
   S.views[view] = { ...emptyView(), frameId: info.frame_id, w: info.width, h: info.height, img };
+  ensureSlot(S.views[view], S.activeCls);
 }
 
 async function freezeToggle() {
@@ -767,7 +834,7 @@ async function freezeToggle() {
 function clearViewData(view, dropFrame) {
   const v = S.views[view];
   for (const k of Object.keys(v.lines)) S.manualDims[k] = null;
-  if (dropFrame) S.views[view] = emptyView();
+  if (dropFrame) { S.views[view] = emptyView(); ensureSlot(S.views[view], S.activeCls); }
   else { pushHistory(v); v.contour = null; v.lines = {}; v.confirmed = false; v.aiDice = null; }
   if (v.frameId && !dropFrame) api("/api/contour", { json: { frame_id: v.frameId, contour: [] } }).catch(() => {});
   renderAiInfo(); renderDims(); markDots(); draw(); renderContourBar();
@@ -775,6 +842,7 @@ function clearViewData(view, dropFrame) {
 
 function switchView(view) {
   S.view = view;
+  ensureSlot(S.views[view], S.activeCls);
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === view));
   $("annView").textContent = VIEW_TR[view];
   const frozen = !!cur().frameId;
@@ -861,7 +929,8 @@ function setMode(m) {
   $("modeBiopsy").classList.toggle("active", m === "biopsy");
   $("viewerBadge").dataset.mode = m;
   if (m !== "biopsy") store("mode", m);   // biyopsi modu açılışta hatırlanmaz
-  if (m === "annot") refreshDataset();
+  if (m === "annot") { refreshDataset(); renderStructBtns(); }
+  else if (S.activeCls !== 1) setActiveCls(1);   // klinik/biyopside yalnızca nodül
   if (m === "biopsy" && prev !== "biopsy") enterBiopsy();
   else if (m !== "biopsy" && prev === "biopsy") exitBiopsy();
 }
@@ -963,7 +1032,10 @@ function onBiopsyState() {
   $("bxAngle").textContent = g.needle_angle_deg != null ? `${g.needle_angle_deg.toFixed(0)}°` : "–";
   $("bxAngDiff").textContent = g.angle_diff_deg != null ? `${g.angle_diff_deg > 0 ? "+" : ""}${g.angle_diff_deg.toFixed(0)}°` : "–";
   $("bxDepth").textContent = fmt(g.tip_depth, unit);
-  $("bxPerf").textContent = `Takip: ${st.fps ?? "–"} kare/sn · ${st.proc_ms != null ? st.proc_ms.toFixed(0) : "–"} ms`;
+  $("bxPerf").textContent = `Takip: ${st.fps ?? "–"} kare/sn · ${st.proc_ms != null ? st.proc_ms.toFixed(0) : "–"} ms` +
+    (st.anatomy_on && st.anatomy?.ms != null ? ` · anatomi ${st.anatomy.ms} ms` : "");
+  renderSession(st.session);
+  if (st.anatomy?.error) $("bxAnatInfo").textContent = "Anatomi hatası: " + st.anatomy.error;
   if (!B.raf) B.raf = requestAnimationFrame(() => { B.raf = 0; drawOverlay(); });
 }
 
@@ -982,6 +1054,23 @@ function drawOverlay() {
   const status = g.status || "searching", col = BX_COLOR[status] || "#ccc";
   const mm = st.mm_per_px;
   octx.lineCap = "round";
+
+  // Canlı anatomi katmanı (en altta)
+  const polys = st.anatomy_on ? st.anatomy?.polys : null;
+  if (polys) {
+    for (const [cid, list] of Object.entries(polys)) {
+      const c = anatClass(cid);
+      for (const poly of list) {
+        octx.save();
+        octx.beginPath();
+        poly.forEach((p, i) => { const q = P(p); i ? octx.lineTo(q[0], q[1]) : octx.moveTo(q[0], q[1]); });
+        octx.closePath();
+        octx.globalAlpha = 0.16; octx.fillStyle = c?.color || "#888"; octx.fill();
+        octx.globalAlpha = 0.85; octx.strokeStyle = c?.color || "#888"; octx.lineWidth = 1.5 * dpr; octx.stroke();
+        octx.restore();
+      }
+    }
+  }
 
   // Planlanan yol: koridor + kesikli çizgi + hedefe kalan cm işaretleri
   if (plan.target && plan.entry) {
@@ -1056,6 +1145,56 @@ function drawOverlay() {
   }
 }
 
+function renderSession(se) {
+  const on = !!(se && se.active);
+  const b = $("bxSess");
+  b.classList.toggle("rec", on);
+  b.innerHTML = on ? "İşlemi bitir <kbd>B</kbd>" : "İşlemi başlat <kbd>B</kbd>";
+  const u = se?.unit || "mm";
+  const sec = (v) => (v == null ? "–" : `${v.toFixed(1)} sn`);
+  $("bxSDur").textContent = se ? `${Math.floor(se.duration_s / 60)}:${String(Math.floor(se.duration_s % 60)).padStart(2, "0")}` : "–";
+  $("bxSView").textContent = se ? `%${se.tip_in_view_pct.toFixed(0)}` : "–";
+  $("bxSTgt").textContent = se ? sec(se.time_to_target_s) : "–";
+  $("bxSMin").textContent = se?.min_tip_to_target != null ? `${se.min_tip_to_target.toFixed(1)} ${u}` : "–";
+  $("bxSOn").textContent = se ? `%${se.on_track_pct.toFixed(0)}` : "–";
+  $("bxSMiss").textContent = se?.max_miss != null ? `${se.max_miss.toFixed(1)} ${u}` : "–";
+}
+
+async function toggleSession() {
+  const on = !!B.st?.session?.active;
+  try {
+    if (!on) {
+      await api("/api/biopsy/session", { json: { action: "start" } });
+      toast("İşlem oturumu başladı.");
+    } else {
+      const r = await api("/api/biopsy/session", { json: { action: "stop", study_no: $("bxStudy").value, operator: $("radiologist").value } });
+      toast(`Oturum kaydedildi: ${Math.round(r.duration_s)} sn · uç görüntüde %${r.tip_in_view_pct.toFixed(0)}` +
+        (r.time_to_target_s != null ? ` · hedefe ${r.time_to_target_s.toFixed(1)} sn` : " · hedefe ulaşılmadı"));
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderLegend() {
+  const box = $("bxLegend");
+  box.innerHTML = "";
+  for (const c of S.status?.anatomy || []) {
+    const s_ = document.createElement("span");
+    s_.innerHTML = `<i style="background:${c.color}"></i>${c.name}`;
+    box.appendChild(s_);
+  }
+}
+
+async function toggleAnatomy(on) {
+  try {
+    const r = await api("/api/biopsy/anatomy", { json: { on } });
+    const m = S.status?.model;
+    $("bxAnatInfo").textContent = !r.on ? "" : r.multiclass
+      ? "Çok sınıflı model: tüm yapılar gösteriliyor."
+      : m?.is_demo ? "Demo segmentasyon: yalnızca koyu (nodül benzeri) alanlar; klinik değildir."
+        : "Tek sınıflı model: yalnızca nodül gösteriliyor. Diğer yapılar için anatomi modeli eğitin.";
+  } catch (e) { $("bxAnat").checked = false; $("bxAnatInfo").textContent = e.message; }
+}
+
 async function biopsySnapshot() {
   if (B.snapBusy) return;
   B.snapBusy = true;
@@ -1075,6 +1214,7 @@ async function refreshDataset() {
     $("dsStats").innerHTML =
       `Veri seti: <b>${st.images}</b> görüntü · <b>${st.patients}</b> hasta · <b>${st.nodules}</b> nodül` +
       `<br>Transvers ${v.transverse || 0} · Longitudinal ${v.longitudinal || 0} · Negatif ${st.negatives}` +
+      (st.with_anatomy ? ` · Anatomi etiketli ${st.with_anatomy}` : "") +
       (st.ai_vs_final_dice_mean != null ? `<br>AI–radyolog uyumu (Dice): <b>${st.ai_vs_final_dice_mean.toFixed(3)}</b> (${st.with_ai} görüntü)` : "");
     const box = $("dsRecent"); box.innerHTML = "";
     for (const it of r.recent) {
@@ -1095,7 +1235,9 @@ async function saveAnnotation() {
   const v = cur();
   if (!v.frameId) return toast("Önce görüntüyü dondurun.");
   const negative = $("annNegative").checked;
-  if (!negative && !v.contour) return toast("Konturu çizin ya da 'nodül yok' işaretleyin.", true);
+  const hasNodule = v.loaded === 1 ? !!v.contour : !!v.slots[1]?.contour;
+  const hasStruct = Object.entries(v.slots).some(([k, sl]) => +k !== 1 && sl.contour) || (v.loaded !== 1 && v.contour);
+  if (!negative && !hasNodule && !hasStruct) return toast("Konturu çizin ya da 'nodül yok' işaretleyin.", true);
   const patient = $("annPatient").value.trim(), annotator = $("annotator").value.trim();
   if (!patient) { $("annPatient").focus(); return toast("Hasta takma kodu gerekli.", true); }
   if (!annotator) { $("annotator").focus(); return toast("Etiketleyen adı gerekli.", true); }
@@ -1302,6 +1444,10 @@ async function init() {
   $("bxPickEntry").onclick = () => setPick(B.pick === "entry" ? null : "entry");
   $("bxClear").onclick = async () => { await api("/api/biopsy/plan", { json: { clear: true } }).catch((e) => toast(e.message, true)); setPick("target"); };
   $("bxSnap").onclick = biopsySnapshot;
+  $("bxSess").onclick = toggleSession;
+  $("bxAnat").addEventListener("change", () => toggleAnatomy($("bxAnat").checked));
+  renderLegend();
+  renderStructBtns();
   $("bxRadius").addEventListener("change", () => api("/api/biopsy/plan", { json: { radius_mm: +$("bxRadius").value || 5 } }).catch(() => {}));
   $("bxTrack").addEventListener("change", () => api("/api/biopsy/plan", { json: { track_target: $("bxTrack").checked } }).catch(() => {}));
   $("btnAnnSave").onclick = saveAnnotation;
@@ -1349,6 +1495,7 @@ async function init() {
       if (k === "t") setPick("target");
       else if (k === "g") setPick("entry");
       else if (k === "f") biopsySnapshot();
+      else if (k === "b") toggleSession();
       else if (k === "escape") setPick(null);
       else if (e.code === "Space") { e.preventDefault(); toast("Biyopsi modunda dondurma kapalı; iğne konumunu F ile kaydedin."); }
       return;

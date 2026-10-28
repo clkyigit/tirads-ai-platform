@@ -26,10 +26,86 @@ def _seg_dist(p, a, b) -> float:
     return math.dist(p, (a[0] + t * ax, a[1] + t * ay))
 
 
+class Session:
+    """Bir biyopsi işleminin ölçümleri (eğitim ve belgeleme için).
+
+    - süre, iğnenin görüldüğü kare oranı ("uç görüntüde %")
+    - ilk algılama ve hedefe ilk ulaşma zamanı
+    - en yakın uç–hedef mesafesi, rotada geçen süre oranı
+    - en büyük ve ortalama tahmini sapma
+    - uç yolu (seyreltilmiş)
+    """
+
+    def __init__(self, sid: str, plan: dict):
+        self.id = sid
+        self.t0 = time.time()
+        self.plan0 = json.loads(json.dumps(plan))
+        self.frames = 0
+        self.found = 0
+        self.on_track = 0
+        self.first_found = None
+        self.first_target = None
+        self.min_dist = None
+        self.misses: list[float] = []
+        self.path: list[list[float]] = []
+        self._last_path_t = 0.0
+        self.unit = "mm"
+        self.ended = None
+
+    def update(self, st: dict):
+        now = time.time()
+        self.frames += 1
+        g = st.get("guide") or {}
+        self.unit = g.get("unit", self.unit)
+        nd = st.get("needle")
+        if nd and nd.get("found"):
+            self.found += 1
+            if self.first_found is None:
+                self.first_found = now - self.t0
+            if now - self._last_path_t > 0.25:
+                self.path.append([round(now - self.t0, 2), *[round(v, 1) for v in nd["tip"]]])
+                self._last_path_t = now
+                self.path = self.path[-600:]
+        status = g.get("status")
+        if status in ("on_track", "in_target"):
+            self.on_track += 1
+        if status == "in_target" and self.first_target is None:
+            self.first_target = now - self.t0
+        d = g.get("tip_to_target")
+        if d is not None:
+            self.min_dist = d if self.min_dist is None else min(self.min_dist, d)
+        if g.get("miss") is not None:
+            self.misses.append(float(g["miss"]))
+            self.misses = self.misses[-5000:]
+
+    def summary(self) -> dict:
+        end = self.ended or time.time()
+        f = max(1, self.frames)
+        return {
+            "id": self.id, "active": self.ended is None,
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.t0)),
+            "duration_s": round(end - self.t0, 1),
+            "frames": self.frames,
+            "tip_in_view_pct": round(100 * self.found / f, 1),
+            "on_track_pct": round(100 * self.on_track / f, 1),
+            "first_detection_s": None if self.first_found is None else round(self.first_found, 1),
+            "time_to_target_s": None if self.first_target is None else round(self.first_target, 1),
+            "min_tip_to_target": None if self.min_dist is None else round(self.min_dist, 1),
+            "max_miss": round(max(self.misses), 1) if self.misses else None,
+            "mean_miss": round(float(np.mean(self.misses)), 1) if self.misses else None,
+            "unit": self.unit,
+        }
+
+
 class BiopsyTracker:
-    def __init__(self, capture, get_cfg):
+    def __init__(self, capture, get_cfg, segmenter_getter=None):
         self.capture = capture
         self.get_cfg = get_cfg            # -> config dict (roi, calibration)
+        self.get_segmenter = segmenter_getter
+        self.session: Session | None = None
+        self.anatomy_on = False
+        self.anatomy: dict = {}
+        self._anat_thread = None
         self.lock = threading.Lock()
         self.plan = {"target": None, "entry": None, "radius_mm": 5.0,
                      "track_target": True}
@@ -57,12 +133,19 @@ class BiopsyTracker:
         self._prev_small = self._motion = None
         self._thread = threading.Thread(target=self._run, daemon=True, name="biopsy")
         self._thread.start()
+        if self.anatomy_on:
+            self.set_anatomy(True)
 
     def stop(self):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3)
         self._thread = None
+        if self._anat_thread:
+            self._anat_thread.join(timeout=3)
+        self._anat_thread = None
+        if self.session and self.session.ended is None:
+            self.session.ended = time.time()
         with self.lock:
             self.state = {"active": False}
             self.version += 1
@@ -85,6 +168,65 @@ class BiopsyTracker:
                 self.plan["track_target"] = bool(track_target)
             self.smoother.reset()
             return dict(self.plan)
+
+    # --------------------------------------------------------- oturum
+    def start_session(self) -> dict:
+        with self.lock:
+            sid = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+            self.session = Session(sid, self.plan)
+            return self.session.summary()
+
+    def stop_session(self) -> dict | None:
+        with self.lock:
+            if not self.session:
+                return None
+            if self.session.ended is None:
+                self.session.ended = time.time()
+            return self.session.summary()
+
+    # ----------------------------------------------------- canlı anatomi
+    def set_anatomy(self, on: bool):
+        self.anatomy_on = bool(on)
+        if not on:
+            with self.lock:
+                self.anatomy = {}
+        elif self.active and (self._anat_thread is None or not self._anat_thread.is_alive()):
+            self._anat_thread = threading.Thread(target=self._anat_run, daemon=True,
+                                                 name="anatomy")
+            self._anat_thread.start()
+
+    def _anat_run(self):
+        """Segmentasyonu kendi hızında çalıştırır (iğne takibini bekletmez)."""
+        from . import anatomy as A
+        from .segmentation import roi_to_px
+        last = -1
+        while not self._stop.is_set() and self.anatomy_on:
+            seg = self.get_segmenter() if self.get_segmenter else None
+            fid, frame = self.capture.latest()
+            if seg is None or not seg.ready or frame is None or fid == last:
+                time.sleep(0.05)
+                continue
+            last = fid
+            t0 = time.perf_counter()
+            try:
+                H, W = frame.shape[:2]
+                x0, y0, x1, y1 = roi_to_px(self.get_cfg().get("roi"), W, H)
+                crop = frame[y0:y1, x0:x1]
+                work = 384
+                lab = seg.predict_labels(crop, work_width=work)
+                sc = lab.shape[1] / max(1, crop.shape[1])
+                polys = A.contours_from_labels(lab, min_area=int(40 * sc * sc) or 20,
+                                               offset=(x0, y0), scale=sc)
+                ms = (time.perf_counter() - t0) * 1000
+                with self.lock:
+                    self.anatomy = {"polys": polys, "frame_id": fid, "ms": round(ms),
+                                    "multiclass": seg.multiclass, "t": time.time()}
+            except Exception as e:
+                log.exception("Canlı anatomi hatası")
+                with self.lock:
+                    self.anatomy = {"error": str(e)}
+                time.sleep(0.5)
+            time.sleep(0.02)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -117,6 +259,11 @@ class BiopsyTracker:
                 self._fps_n, self._fps_t = 0, now
             st["fps"] = round(self.fps, 1)
             with self.lock:
+                if self.session and self.session.ended is None:
+                    self.session.update(st)
+                st["session"] = self.session.summary() if self.session else None
+                st["anatomy_on"] = self.anatomy_on
+                st["anatomy"] = self.anatomy if self.anatomy_on else None
                 self.state = st
                 self.version += 1
 
@@ -197,8 +344,26 @@ STATUS_COLOR = {"searching": (160, 160, 160), "tracking": (80, 220, 255),
                 "in_target": (90, 255, 90), "passed": (60, 60, 255)}
 
 
-def render_overlay(frame: np.ndarray, st: dict) -> np.ndarray:
+def _hex_bgr(h: str):
+    h = h.lstrip("#")
+    return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
+
+
+def render_overlay(frame: np.ndarray, st: dict, summary: dict | None = None) -> np.ndarray:
     img = frame.copy()
+    anat = (st.get("anatomy") or {}).get("polys") or {}
+    if anat:
+        from .anatomy import BY_ID
+        tint = img.copy()
+        for cid, polys in anat.items():
+            c = BY_ID.get(int(cid))
+            if not c:
+                continue
+            col_ = _hex_bgr(c[3])
+            pts = [np.asarray(p_, np.int32).reshape(-1, 1, 2) for p_ in polys]
+            cv2.fillPoly(tint, pts, col_)
+            cv2.polylines(img, pts, True, col_, 1, cv2.LINE_AA)
+        img = cv2.addWeighted(tint, 0.22, img, 0.78, 0)
     plan, g, nd = st.get("plan") or {}, st.get("guide") or {}, st.get("needle")
     tgt, ent = plan.get("target"), plan.get("entry")
     R = g.get("target_radius_px", 25)
@@ -226,6 +391,12 @@ def render_overlay(frame: np.ndarray, st: dict) -> np.ndarray:
         lines.append(f"Tahmini sapma: {g['miss']:.1f} {unit}")
     if g.get("needle_angle_deg") is not None:
         lines.append(f"Aci: {g['needle_angle_deg']:.0f} derece")
+    if summary:
+        lines.append(f"Sure: {summary['duration_s']:.0f} sn  Uc gorunur: %{summary['tip_in_view_pct']:.0f}")
+        if summary.get("time_to_target_s") is not None:
+            lines.append(f"Hedefe ulasma: {summary['time_to_target_s']:.1f} sn")
+        if summary.get("min_tip_to_target") is not None:
+            lines.append(f"En yakin: {summary['min_tip_to_target']:.1f} {summary['unit']}")
     lines.append(time.strftime("%d.%m.%Y %H:%M:%S"))
     # Bilgi kutusu: sol alt köşe, koyu zemin (cihaz üst şeridiyle çakışmasın)
     lh, pad = 26, 10

@@ -24,7 +24,7 @@ from starlette.responses import (FileResponse, JSONResponse, Response,
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import biopsy, dataset, measure, storage, tirads
+from . import anatomy, biopsy, dataset, measure, storage, tirads
 from . import devices as devmod
 from .capture import CaptureManager
 from .config import ROOT, Config
@@ -61,7 +61,8 @@ class State:
             c["source"]["type"] = "demo"
             c["model"]["backend"] = "demo"
         self.segmenter = Segmenter(c["model"], ROOT)
-        self.biopsy = biopsy.BiopsyTracker(self.capture, self.cfg.get)
+        self.biopsy = biopsy.BiopsyTracker(self.capture, self.cfg.get,
+                                           lambda: self.segmenter)
         if start_capture:
             self.capture.start(c["source"])
 
@@ -76,7 +77,7 @@ class State:
         img = apply_privacy(img, self.cfg.get()["privacy_masks"])
         with self.frames_lock:
             self.frames[fid] = {"image": img, "mask": None, "ai_mask": None,
-                                "confirmed": False,
+                                "confirmed": False, "structs": {},
                                 "origin": origin, "ai": None,
                                 "ts": time.time()}
             while len(self.frames) > MAX_FRAMES:
@@ -128,6 +129,7 @@ def create_app(config_path: Path | None = None, start_capture=True,
             "calibration": c["calibration"],
             "roi": c["roi"], "privacy_masks": c["privacy_masks"],
             "lexicon": tirads.lexicon(),
+            "anatomy": anatomy.public(),
         })
 
     async def devices(_):
@@ -277,6 +279,24 @@ def create_app(config_path: Path | None = None, start_capture=True,
         except KeyError as e:
             return _err(str(e), 404)
         contour = body.get("contour") or []
+        cls = int(body.get("cls") or 1)
+        if cls != 1:
+            # Nodül dışı anatomik yapı (tiroid, karotis, ...): yalnızca maske
+            if cls not in anatomy.BY_ID:
+                return _err("Geçersiz yapı sınıfı")
+            if len(contour) < 3:
+                fr["structs"].pop(cls, None)
+                return JSONResponse({"cleared": True})
+            H, W = fr["image"].shape[:2]
+            m = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(m, [np.asarray(contour, np.int32).reshape(-1, 1, 2)], 1)
+            clean = measure.mask_to_contour(m)
+            if len(clean) < 3:
+                return _err("Kontur alanı boş.")
+            m = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(m, [np.asarray(clean, np.int32).reshape(-1, 1, 2)], 1)
+            fr["structs"][cls] = m
+            return JSONResponse({"contour": clean, "cls": cls})
         # source: "manual" (sıfırdan çizim) | "edit" (düzeltme) | "ai" (AI
         # önerisine geri dönüş, ör. geri al) ; confirmed: radyolog onayı
         source = body.get("source", "edit")
@@ -527,7 +547,8 @@ def create_app(config_path: Path | None = None, start_capture=True,
         try:
             d = await run_in_threadpool(
                 dataset.save_annotation, ds_root(), image=fr["image"],
-                mask=fr["mask"], ai_mask=fr.get("ai_mask"), meta=meta)
+                mask=fr["mask"], ai_mask=fr.get("ai_mask"), meta=meta,
+                structs=dict(fr.get("structs") or {}))
         except ValueError as e:
             return _err(str(e))
         rel = "/".join(d.parts[-3:])
@@ -596,6 +617,45 @@ def create_app(config_path: Path | None = None, start_capture=True,
             return _err(str(e))
         return JSONResponse({"plan": plan})
 
+    async def biopsy_session(req: Request):
+        b = await req.json()
+        if b.get("action") == "start":
+            if not st.biopsy.active:
+                return _err("Biyopsi takibi kapalı.", 409)
+            return JSONResponse(st.biopsy.start_session())
+        summ = st.biopsy.stop_session()
+        if summ is None:
+            return _err("Açık oturum yok.", 409)
+        # Özet + son görüntü kaydı
+        d = st.cfg.data_dir() / "biopsy" / "sessions" / summ["id"]
+        d.mkdir(parents=True, exist_ok=True)
+        sess = st.biopsy.session
+        rec = {**summ, "plan_at_start": sess.plan0, "tip_path": sess.path,
+               "study_no": (b.get("study_no") or "").strip(),
+               "operator": (b.get("operator") or "").strip(),
+               "note": (b.get("note") or "").strip(),
+               "software": "tirads-ai-platform (araştırma amaçlı)"}
+        (d / "summary.json").write_text(json.dumps(rec, indent=2, ensure_ascii=False),
+                                        encoding="utf-8")
+        _, frame = st.capture.latest()
+        state = st.biopsy.snapshot()
+        if frame is not None and state.get("active"):
+            img = apply_privacy(frame, st.cfg.get()["privacy_masks"])
+            await run_in_threadpool(
+                lambda: cv2.imwrite(str(d / "last.jpg"),
+                                    biopsy.render_overlay(img, state, summ),
+                                    [cv2.IMWRITE_JPEG_QUALITY, 92]))
+        return JSONResponse({**summ, "path": str(d)})
+
+    async def biopsy_anatomy(req: Request):
+        b = await req.json()
+        on = bool(b.get("on"))
+        if on and not st.segmenter.ready:
+            return _err(st.segmenter.error or "Segmentasyon modeli yüklü değil.", 409)
+        st.biopsy.set_anatomy(on)
+        return JSONResponse({"on": st.biopsy.anatomy_on,
+                             "multiclass": st.segmenter.multiclass})
+
     async def biopsy_state(_):
         return JSONResponse(st.biopsy.snapshot())
 
@@ -660,6 +720,8 @@ def create_app(config_path: Path | None = None, start_capture=True,
         Route("/api/biopsy/stop", biopsy_stop, methods=["POST"]),
         Route("/api/biopsy/plan", biopsy_plan, methods=["POST"]),
         Route("/api/biopsy/state", biopsy_state),
+        Route("/api/biopsy/session", biopsy_session, methods=["POST"]),
+        Route("/api/biopsy/anatomy", biopsy_anatomy, methods=["POST"]),
         Route("/api/biopsy/events", biopsy_events),
         Route("/api/biopsy/snapshot", biopsy_snapshot, methods=["POST"]),
         Route("/api/dataset", dataset_stats),

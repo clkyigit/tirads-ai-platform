@@ -87,7 +87,8 @@ class Segmenter:
             raise SegmenterError(f"Bilinmeyen model.backend: {kind}")
 
     SIDECAR_KEYS = ("encoder", "in_channels", "classes", "nodule_class",
-                    "input_size", "normalize", "output_activation", "threshold")
+                    "input_size", "normalize", "output_activation", "threshold",
+                    "class_names")
 
     def _apply_sidecar(self, p: Path):
         """Eğitim scriptinin model dosyasının yanına yazdığı <ad>.json:
@@ -187,6 +188,8 @@ class Segmenter:
                 "input_size": self.cfg.get("input_size"),
                 "is_demo": self.backend == "demo",
                 "trained": self.sidecar,
+                "classes": int(self.cfg.get("classes", 1)),
+                "multiclass": self.multiclass,
                 "normalize": self.cfg.get("normalize"),
                 "threshold": self.cfg.get("threshold")}
 
@@ -226,6 +229,49 @@ class Segmenter:
             prob = out[0] if classes == 1 else out[int(self.cfg.get("nodule_class", 1))]
         return prob
 
+    @property
+    def multiclass(self) -> bool:
+        return self.ready and self.backend != "demo" and int(self.cfg.get("classes", 1)) > 1
+
+    def _raw(self, img_bgr):
+        x = self._preprocess(img_bgr)
+        if self.backend == "onnx":
+            return self._sess.run(None, {self._input_name: x})[0]
+        import torch
+        with torch.inference_mode():
+            t = torch.from_numpy(x).to(self.device)
+            return self._model(t).float().cpu().numpy()
+
+    def predict_labels(self, img_bgr: np.ndarray, work_width: int = 0) -> np.ndarray:
+        """ROI için etiket haritası (uint8, ROI boyutunda ya da work_width'e
+        küçültülmüş). Tek sınıflı modelde 0/1 (nodül), çok sınıflıda 0..K-1."""
+        if not self.ready:
+            raise SegmenterError(self.error or "Model hazır değil.")
+        h, w = img_bgr.shape[:2]
+        tw, th_ = (w, h)
+        if work_width and w > work_width:
+            tw, th_ = work_width, int(round(h * work_width / w))
+        if self.backend == "demo":
+            prob = _demo_prob(img_bgr)
+            lab = (prob >= float(self.cfg.get("threshold", 0.5))).astype(np.uint8)
+            lab = cv2.morphologyEx(lab, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+            # Demo: kenara değen koyu bantlar (cilt altı, derin zayıflama) nodül değil
+            n, cc, stats, _ = cv2.connectedComponentsWithStats(lab, 8)
+            hh, ww = lab.shape
+            for i in range(1, n):
+                x, y, bw, bh = stats[i, :4]
+                if x <= 1 or y <= 1 or x + bw >= ww - 1 or y + bh >= hh - 1:
+                    lab[cc == i] = 0
+            return cv2.resize(lab, (tw, th_), interpolation=cv2.INTER_NEAREST)
+        out = np.asarray(self._raw(img_bgr), np.float32)[0]
+        if out.shape[0] == 1:
+            prob = 1.0 / (1.0 + np.exp(-out[0])) if self.cfg.get("output_activation", "auto") != "none" else out[0]
+            prob = cv2.resize(prob, (tw, th_), interpolation=cv2.INTER_LINEAR)
+            return (prob >= float(self.cfg.get("threshold", 0.5))).astype(np.uint8)
+        # Çok sınıflı: kanal başına yeniden boyutlandırıp argmax
+        up = np.stack([cv2.resize(c, (tw, th_), interpolation=cv2.INTER_LINEAR) for c in out])
+        return up.argmax(0).astype(np.uint8)
+
     def predict_prob(self, img_bgr: np.ndarray) -> np.ndarray:
         """img_bgr (ROI) için ROI boyutunda olasılık haritası."""
         if not self.ready:
@@ -233,15 +279,7 @@ class Segmenter:
         h, w = img_bgr.shape[:2]
         if self.backend == "demo":
             return _demo_prob(img_bgr)
-        x = self._preprocess(img_bgr)
-        if self.backend == "onnx":
-            out = self._sess.run(None, {self._input_name: x})[0]
-        else:
-            import torch
-            with torch.inference_mode():
-                t = torch.from_numpy(x).to(self.device)
-                out = self._model(t).float().cpu().numpy()
-        prob = self._postprocess(out)
+        prob = self._postprocess(self._raw(img_bgr))
         return cv2.resize(prob, (w, h), interpolation=cv2.INTER_LINEAR)
 
     def segment(self, frame_bgr: np.ndarray, roi: list | None,

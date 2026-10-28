@@ -34,7 +34,8 @@ def safe_id(s: str, n: int = 40) -> str:
 
 
 def save_annotation(root: Path, *, image: np.ndarray, mask: np.ndarray | None,
-                    ai_mask: np.ndarray | None, meta: dict) -> Path:
+                    ai_mask: np.ndarray | None, meta: dict,
+                    structs: dict | None = None) -> Path:
     pid = safe_id(meta.get("patient_id", ""))
     nid = safe_id(meta.get("nodule_id", "")) or "N1"
     if not pid:
@@ -42,9 +43,13 @@ def save_annotation(root: Path, *, image: np.ndarray, mask: np.ndarray | None,
     if meta.get("view") not in VIEWS:
         raise ValueError("Görünüm transverse veya longitudinal olmalı.")
     negative = bool(meta.get("negative"))
+    structs = {int(k): v for k, v in (structs or {}).items() if v is not None and v.any()}
     if not negative and (mask is None or not mask.any()):
-        raise ValueError("Maske yok. Konturu çizin ya da 'nodül yok (negatif)' "
-                         "olarak işaretleyin.")
+        if structs:
+            negative = True   # yalnızca anatomi çizilmiş: nodül yok örneği
+        else:
+            raise ValueError("Maske yok. Konturu çizin ya da 'nodül yok (negatif)' "
+                             "olarak işaretleyin.")
     aid = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
     d = root / pid / nid / aid
     d.mkdir(parents=True, exist_ok=False)
@@ -54,6 +59,13 @@ def save_annotation(root: Path, *, image: np.ndarray, mask: np.ndarray | None,
     cv2.imwrite(str(d / "mask.png"), (m > 0).astype(np.uint8) * 255)
     if ai_mask is not None:
         cv2.imwrite(str(d / "mask_ai.png"), (ai_mask > 0).astype(np.uint8) * 255)
+    if structs:
+        # Çok sınıflı etiket haritası: 0 arka plan, 1 nodül, 2 tiroid, ...
+        from .anatomy import BY_ID, label_map
+        lab = label_map((H, W), {**structs, **({1: m} if m.any() else {})})
+        cv2.imwrite(str(d / "labels.png"), lab)
+        meta["structures"] = sorted([BY_ID[c][1] for c in structs if c in BY_ID]
+                                    + (["nodule"] if m.any() else []))
     meta = {**meta, "patient_id": pid, "nodule_id": nid, "annotation_id": aid,
             "width": W, "height": H, "negative": negative,
             "mask_area_px": int((m > 0).sum()),
@@ -82,7 +94,7 @@ def iter_annotations(root: Path):
 def stats(root: Path) -> dict:
     patients, nodules = set(), set()
     views, annot, levels = Counter(), Counter(), Counter()
-    n = neg = with_ai = 0
+    n = neg = with_ai = with_struct = 0
     dices = []
     for _, m in iter_annotations(root):
         n += 1
@@ -91,6 +103,7 @@ def stats(root: Path) -> dict:
         views[m.get("view")] += 1
         annot[m.get("annotator") or "-"] += 1
         neg += bool(m.get("negative"))
+        with_struct += bool(m.get("structures"))
         lv = (m.get("tirads") or {}).get("level")
         levels[f"TR{lv}" if lv else "yok"] += 1
         if "ai_vs_final_dice" in m:
@@ -99,6 +112,7 @@ def stats(root: Path) -> dict:
     return {"images": n, "patients": len(patients), "nodules": len(nodules),
             "negatives": neg, "views": dict(views), "annotators": dict(annot),
             "tirads_levels": dict(levels), "with_ai": with_ai,
+            "with_anatomy": with_struct,
             "ai_vs_final_dice_mean": float(np.mean(dices)) if dices else None}
 
 
@@ -186,7 +200,8 @@ def export(root: Path, out: Path, *, val=0.15, test=0.15, seed=42,
     (out / "images").mkdir(parents=True)
     (out / "masks").mkdir()
     rows = ["id,patient_id,nodule_id,view,split,negative,mm_per_px,"
-            "width,height,tirads_level,annotator"]
+            "width,height,tirads_level,annotator,has_labels"]
+    (out / "labels").mkdir()
     counts = Counter()
     for d, m in anns:
         img = cv2.imread(str(d / "image.png"), cv2.IMREAD_COLOR)
@@ -198,6 +213,11 @@ def export(root: Path, out: Path, *, val=0.15, test=0.15, seed=42,
         iid = f"{m['patient_id']}_{m['nodule_id']}_{m['annotation_id']}"
         cv2.imwrite(str(out / "images" / f"{iid}.png"), img)
         cv2.imwrite(str(out / "masks" / f"{iid}.png"), msk)
+        has_labels = (d / "labels.png").exists()
+        if has_labels:
+            lab = cv2.imread(str(d / "labels.png"), cv2.IMREAD_GRAYSCALE)[y0:y1, x0:x1]
+            cv2.imwrite(str(out / "labels" / f"{iid}.png"), lab)
+            counts["with_labels"] += 1
         sp = which[m["patient_id"]]
         counts[sp] += 1
         lvl = (m.get("tirads") or {}).get("level") or ""
@@ -205,10 +225,12 @@ def export(root: Path, out: Path, *, val=0.15, test=0.15, seed=42,
             iid, m["patient_id"], m["nodule_id"], m.get("view"), sp,
             int(bool(m.get("negative"))), m.get("mm_per_px") or "",
             img.shape[1], img.shape[0], lvl,
-            safe_id(m.get("annotator") or ""))))
+            safe_id(m.get("annotator") or ""), int(has_labels))))
     (out / "index.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     (out / "splits.json").write_text(json.dumps(splits, indent=2), encoding="utf-8")
+    with_labels = counts.pop("with_labels", 0)
     summary = {"images": sum(counts.values()), "by_split": dict(counts),
+               "with_labels": with_labels,
                "patients": {k: len(v) for k, v in splits.items()}}
     if nnunet_id is not None:
         summary["nnunet"] = str(_export_nnunet(out, int(nnunet_id)))

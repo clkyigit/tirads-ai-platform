@@ -47,6 +47,7 @@ def load_index(data: Path) -> list[dict]:
         rows = list(csv.DictReader(f))
     for r in rows:
         r["negative"] = r["negative"] == "1"
+        r["has_labels"] = r.get("has_labels", "0") == "1"
         r["mm_per_px"] = float(r["mm_per_px"]) if r["mm_per_px"] else None
     return rows
 
@@ -102,10 +103,10 @@ class SegDataset:
     """Harita tipi veri seti (torch.utils.data.DataLoader ile uyumlu)."""
 
     def __init__(self, data: Path, rows: list[dict], size, in_channels, normalize,
-                 train: bool, seed: int = 0):
+                 train: bool, seed: int = 0, task: str = "nodule"):
         self.data, self.rows = data, rows
         self.size, self.cin, self.norm = tuple(size), in_channels, normalize
-        self.train = train
+        self.train, self.task = train, task
 
     def __len__(self):
         return len(self.rows)
@@ -113,7 +114,8 @@ class SegDataset:
     def __getitem__(self, i):
         r = self.rows[i]
         img = cv2.imread(str(self.data / "images" / f"{r['id']}.png"), cv2.IMREAD_COLOR)
-        msk = cv2.imread(str(self.data / "masks" / f"{r['id']}.png"), cv2.IMREAD_GRAYSCALE)
+        sub = "labels" if self.task == "anatomy" else "masks"
+        msk = cv2.imread(str(self.data / sub / f"{r['id']}.png"), cv2.IMREAD_GRAYSCALE)
         if self.train:
             # DataLoader işçileri veri setinin kopyasını tutar; her çağrıda
             # taze tohum, böylece her epoch farklı artırma görülür.
@@ -121,6 +123,8 @@ class SegDataset:
             img, msk = augment(img, msk, rng)
         x = to_input(img, self.size, self.cin, self.norm)
         y = cv2.resize(msk, self.size, interpolation=cv2.INTER_NEAREST)
+        if self.task == "anatomy":
+            return x, y.astype(np.int64)            # sınıf kimlikleri (H×W)
         return x, (y > 0).astype(np.float32)[None]
 
 
@@ -166,11 +170,11 @@ def summarize(results: list[dict]) -> dict:
 
 
 # ------------------------------------------------------------------ eğitim
-def build_model(encoder, weights, in_channels):
+def build_model(encoder, weights, in_channels, classes=1):
     import segmentation_models_pytorch as smp
     try:
         return smp.UnetPlusPlus(encoder_name=encoder, encoder_weights=weights,
-                                in_channels=in_channels, classes=1)
+                                in_channels=in_channels, classes=classes)
     except Exception as e:
         if weights is None:
             raise
@@ -178,7 +182,7 @@ def build_model(encoder, weights, in_channels):
               "rastgele başlatılıyor. İnternetsiz makinede --encoder-weights none "
               "kullanın ya da ağırlıkları önceden indirin.")
         return smp.UnetPlusPlus(encoder_name=encoder, encoder_weights=None,
-                                in_channels=in_channels, classes=1)
+                                in_channels=in_channels, classes=classes)
 
 
 def predict_full(model, img_bgr, size, cin, norm, device) -> np.ndarray:
@@ -189,7 +193,45 @@ def predict_full(model, img_bgr, size, cin, norm, device) -> np.ndarray:
     return cv2.resize(p, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
+def class_dice(pred: np.ndarray, gt: np.ndarray, classes) -> dict:
+    """Sınıf başına Dice; GT'de ve tahminde olmayan sınıf atlanır."""
+    out = {}
+    for c in classes:
+        a, b = pred == c, gt == c
+        if a.any() or b.any():
+            out[c] = float(2 * (a & b).sum() / (a.sum() + b.sum()))
+    return out
+
+
+def evaluate_anatomy(model, data, rows, args, device) -> dict:
+    from backend.anatomy import BY_ID, CLASSES
+    model.eval()
+    per = {c[0]: [] for c in CLASSES}
+    cases = []
+    for r in rows:
+        img = cv2.imread(str(data / "images" / f"{r['id']}.png"), cv2.IMREAD_COLOR)
+        gt = cv2.imread(str(data / "labels" / f"{r['id']}.png"), cv2.IMREAD_GRAYSCALE)
+        x = torch.from_numpy(to_input(img, tuple(args.size), args.in_channels,
+                                      args.normalize)[None]).to(device)
+        with torch.inference_mode():
+            lg = model(x)[0].float().cpu().numpy()
+        h, w = gt.shape
+        up = np.stack([cv2.resize(c, (w, h), interpolation=cv2.INTER_LINEAR) for c in lg])
+        pred = up.argmax(0)
+        d = class_dice(pred, gt, list(per))
+        for c, v in d.items():
+            per[c].append(v)
+        cases.append({"id": r["id"], **{BY_ID[c][1]: v for c, v in d.items()}})
+    by_cls = {BY_ID[c][1]: (float(np.mean(v)) if v else None) for c, v in per.items()}
+    vals = [v for v in by_cls.values() if v is not None]
+    return {"summary": {"dice": float(np.mean(vals)) if vals else None, "by_class": by_cls,
+                        "size_err_mm": None, "size_err_mm_p90": None,
+                        "false_positive": None}, "cases": cases}
+
+
 def evaluate(model, data, rows, args, device) -> dict:
+    if getattr(args, "task", "nodule") == "anatomy":
+        return evaluate_anatomy(model, data, rows, args, device)
     model.eval()
     res = []
     for r in rows:
@@ -204,7 +246,22 @@ def evaluate(model, data, rows, args, device) -> dict:
     return {"summary": summarize(res), "cases": res}
 
 
+def loss_fn_multiclass(logits, target):
+    """Çapraz entropi + (arka plan hariç) yumuşak Dice."""
+    ce = torch.nn.functional.cross_entropy(logits, target)
+    p = torch.softmax(logits, 1)
+    oh = torch.nn.functional.one_hot(target, logits.shape[1]).permute(0, 3, 1, 2).float()
+    inter = (p * oh).sum((0, 2, 3))
+    den = p.sum((0, 2, 3)) + oh.sum((0, 2, 3))
+    present = (oh.sum((0, 2, 3)) > 0).float()
+    d = 1 - (2 * inter + 1) / (den + 1)
+    d, present = d[1:], present[1:]
+    return ce + (d * present).sum() / present.sum().clamp(min=1)
+
+
 def loss_fn(logits, target):
+    if target.dtype == torch.int64:
+        return loss_fn_multiclass(logits, target)
     bce = torch.nn.functional.binary_cross_entropy_with_logits(logits, target)
     p = torch.sigmoid(logits)
     inter = (p * target).sum((1, 2, 3))
@@ -229,7 +286,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, default=Path("data/export"))
     ap.add_argument("--out", type=Path, default=Path("models"))
-    ap.add_argument("--name", default="unetpp")
+    ap.add_argument("--name", default=None,
+                    help="çıktı adı (varsayılan: unetpp ya da unetpp_anatomy)")
+    ap.add_argument("--task", choices=["nodule", "anatomy"], default="nodule",
+                    help="nodule: tek sınıf nodül; anatomy: nodül+tiroid+karotis+"
+                         "juguler ven+trakea (labels.png olan görüntüler)")
     ap.add_argument("--encoder", default="resnet34")
     ap.add_argument("--encoder-weights", default="imagenet",
                     help="imagenet | none")
@@ -261,6 +322,15 @@ def main():
         "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
         else "cpu")
     rows = load_index(args.data)
+    if args.name is None:
+        args.name = "unetpp_anatomy" if args.task == "anatomy" else "unetpp"
+    if args.task == "anatomy":
+        rows = [r for r in rows if r["has_labels"]]
+        if not rows:
+            raise SystemExit("Anatomi etiketi (labels.png) olan görüntü yok. Etiketleme "
+                             "modunda tiroid/karotis/juguler ven/trakea çizin.")
+    from backend.anatomy import CLASSES, NUM_CLASSES
+    n_classes = NUM_CLASSES if args.task == "anatomy" else 1
     tr = [r for r in rows if r["split"] == "train"]
     va = [r for r in rows if r["split"] == "val"]
     te = [r for r in rows if r["split"] == "test"]
@@ -273,7 +343,7 @@ def main():
 
     # Test değerlendirmesinde ön eğitimli ağırlık indirmeye gerek yok
     model = build_model(args.encoder, None if args.eval_test else weights,
-                        args.in_channels)
+                        args.in_channels, n_classes)
 
     if args.eval_test:
         model.load_state_dict(torch.load(pth, map_location="cpu", weights_only=True))
@@ -285,7 +355,7 @@ def main():
 
     model.to(dev)
     ds = SegDataset(args.data, tr, args.size, args.in_channels, args.normalize,
-                    train=True, seed=args.seed)
+                    train=True, seed=args.seed, task=args.task)
     dl = torch.utils.data.DataLoader(ds, batch_size=args.batch, shuffle=True,
                                      num_workers=args.workers, drop_last=len(tr) > args.batch,
                                      pin_memory=dev == "cuda",
@@ -324,15 +394,21 @@ def main():
                     f"{fmt(s['size_err_mm'])},{fmt(s['false_positive'])},{dt:.0f}\n")
         msg = (f"[{ep:3d}/{args.epochs}] kayıp {tot / max(1, n):.4f} · val Dice {vd:.4f}"
                + (f" · boyut hatası {s['size_err_mm']:.2f} mm" if s["size_err_mm"] is not None else "")
+               + ("".join(f" · {k} {v:.2f}" for k, v in (s.get("by_class") or {}).items()
+                          if v is not None))
                + f" · {dt:.0f} sn")
         if vd > best:
             best, bad = vd, 0
             torch.save(model.state_dict(), pth)
             meta = {
                 "architecture": "UnetPlusPlus", "encoder": args.encoder,
-                "in_channels": args.in_channels, "classes": 1,
+                "in_channels": args.in_channels, "classes": n_classes,
                 "input_size": list(args.size), "normalize": args.normalize,
-                "output_activation": "sigmoid", "threshold": args.threshold,
+                "output_activation": "softmax" if n_classes > 1 else "sigmoid",
+                "threshold": args.threshold, "task": args.task, "nodule_class": 1,
+                "class_names": (["background"] + [c[1] for c in CLASSES])
+                if n_classes > 1 else ["nodule"],
+                "val_by_class": s.get("by_class"),
                 "trained_at": time.strftime("%Y-%m-%d %H:%M"), "epoch": ep,
                 "val_dice": vd, "val_size_err_mm": s["size_err_mm"],
                 "val_size_err_mm_p90": s["size_err_mm_p90"],

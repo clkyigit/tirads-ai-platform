@@ -90,6 +90,7 @@ Kayıtta AI'ın ilk konturu (`*_mask_ai.png`) ve radyoloğun son konturu (`*_mas
 | Del | Konturu sil |
 | T / G | Biyopsi: hedefi / giriş noktasını seç |
 | F | Biyopsi: iğne konumunu kaydet |
+| B | Biyopsi: işlem oturumunu başlat / bitir |
 | S | Etiketi kaydet (etiketleme modunda) |
 | Esc | Aracı bırak |
 
@@ -106,6 +107,18 @@ Kayıtta AI'ın ilk konturu (`*_mask_ai.png`) ve radyoloğun son konturu (`*_mas
    - **Uç hedefi geçti** (kırmızı).
    - Ayrıca: uç–hedef mesafesi, kalan yol, iğne açısı, plana göre açı farkı ve uç derinliği.
 4. **İğne konumunu kaydet (F):** o anki görüntü, rehber çizimi ve ölçümler `data/biopsy/<tarih>/` altına kaydedilir (`frame.png`, `overlay.jpg`, `state.json`). Belgeleme için kullanılabilir.
+5. **İşlem oturumu (B):** "İşlemi başlat" ile işlem süresince şu ölçümler toplanır:
+   - süre
+   - **uç görüntüde %** (iğnenin algılandığı kare oranı)
+   - **hedefe ulaşma süresi**
+   - en yakın uç–hedef mesafesi
+   - rotada geçen süre oranı
+   - en büyük tahmini sapma
+
+   "İşlemi bitir" ile özet `data/biopsy/sessions/<oturum>/` altına kaydedilir: `summary.json` (uç yolu dahil) ve `last.jpg`. Asistan eğitimi ve tezde nicel veri olarak kullanılabilir.
+6. **Canlı anatomi katmanı:** segmentasyon modeli canlı görüntüde arka planda çalışır ve yapılar renkli gösterilir (nodül, tiroid, karotis, juguler ven, trakea). Bu işlem iğne takibini yavaşlatmaz. Tek sınıflı (yalnızca nodül) modelde yalnızca nodül, çok sınıflı **anatomi modelinde** tüm yapılar görünür.
+
+**Eğitim / alıştırma:** Kayıtlı bir USG videosunu **Ayarlar → Görüntü kaynağı → Video dosyası** ile açıp aynı biyopsi modunda hedef seçimi, rehber ve oturum ölçümleriyle alıştırma yapabilirsiniz. Video döngü halinde oynatılır.
 
 Nasıl çalışır: Eğitilmiş bir model gerekmez. İğne, görüntüdeki ince, parlak, eğik çizgi olarak bulunur (arka plan çıkarma, Hough, çizgi uydurma). Aşağıdaki ön bilgiler kullanılır:
 - Planlanan yol.
@@ -141,6 +154,12 @@ Model henüz yoksa önce veri toplanır. Etiketleme de bu uygulamada yapılır. 
 
 TI-RADS formu isteğe bağlıdır; doldurulursa etiketle birlikte saklanır ve ileride özellik sınıflayıcıları için kullanılır.
 
+**Anatomi etiketleme (çok sınıflı):** Etiket panelindeki **Çizilen yapı** düğmeleriyle nodülün yanında **tiroid, karotis, juguler ven ve trakea** da çizilebilir.
+- Her yapının kendi konturu ve geri al geçmişi vardır. Düzenleme araçları (D / E / K) seçili yapıda çalışır; ölçümler yalnızca nodülden alınır.
+- Yapılar `labels.png` etiket haritasına yazılır: 0 arka plan, 1 nodül, 2 tiroid, 3 karotis, 4 juguler ven, 5 trakea.
+- Nodül olmayan karede yalnızca anatomi çizilirse kare "nodül yok" örneği olarak kaydedilir.
+- Her karede tüm yapıları çizmek zorunlu değildir, ama anatomi modeli için çizilen karelerde **görünen tüm yapıları** çizmek gerekir. Çizilmeyen yapı model için "arka plan" sayılır.
+
 İpuçları:
 - Aynı nodülden farklı açılardan birkaç kare kaydedin; çeşitlilik modeli güçlendirir. Bölme hasta düzeyinde yapıldığı için bu durum sızıntıya yol açmaz.
 - Cihaz ayarlarını (preset, SRI/compound, frekans) standart tutun ya da bilinçli olarak çeşitlendirin, ama kaydını tutun.
@@ -175,6 +194,11 @@ python -m tools.train_unetpp --data data/export --out models
   python -m tools.train_unetpp --data data/export --out models --eval-test
   ```
 - İnternetsiz makinede `--encoder-weights none` kullanın ya da ağırlıkları önceden indirin.
+- **Anatomi modeli** (çok sınıflı, canlı anatomi katmanı için):
+  ```bash
+  python -m tools.train_unetpp --data data/export --out models --task anatomy
+  ```
+  Yalnızca `labels.png` olan görüntüler kullanılır. Kayıp fonksiyonu çapraz entropi ile Dice'ın birleşimidir; doğrulamada sınıf başına Dice raporlanır. Çıktı `models/unetpp_anatomy.onnx` olur ve Ayarlar'dan yüklenir. Bu model hem nodül segmentasyonunu (nodül kanalı) hem canlı anatomiyi sağlar.
 
 Kabaca hedefler: ilk deneme için 100–150 hastada 300+ görüntü; boyut hatası 1–2 mm'nin altına indiğinde biyopsi eşikleri açısından anlamlı hale gelir.
 
@@ -207,7 +231,8 @@ backend/
                    seçimi, otomatik format/çözünürlük
   shortcuts.py     Masaüstü kısayolu ve otomatik başlatma
   needle.py        İğne algılama, hedef takibi, rehber geometrisi
-  biopsy.py        Canlı biyopsi takibi (arka plan), anlık görüntü kaydı
+  biopsy.py        Canlı biyopsi takibi, oturum ölçümleri, canlı anatomi, kayıt
+  anatomy.py       Anatomi sınıfları (nodül, tiroid, karotis, IJV, trakea)
   segmentation.py  UNet++ (.pth / .onnx) çıkarımı, ROI kırpma
   measure.py       Maske → kontur, G/AP/en uzun çap, kalibrasyon
   tirads.py        ACR TI-RADS puanlama ve boyut eşikleri (tek doğruluk kaynağı)
