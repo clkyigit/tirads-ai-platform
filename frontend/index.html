@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TI-RADS AI Platform</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">TI-RADS <span>AI</span></div>
+  <div class="chips">
+    <span class="chip" id="chipSource" title="Görüntü kaynağı">Kaynak: –</span>
+    <span class="chip" id="chipModel" title="Segmentasyon modeli">Model: –</span>
+    <span class="chip" id="chipCal" title="Kalibrasyon (mm/piksel)">Kalibrasyon: –</span>
+  </div>
+  <div class="mode-switch" role="group" aria-label="Çalışma modu">
+    <button id="modeClinical" class="active">Klinik</button>
+    <button id="modeAnnot">Etiketleme</button>
+    <button id="modeBiopsy">Biyopsi</button>
+  </div>
+  <div class="top-actions">
+    <button id="btnCases" class="ghost clinical-only">Vakalar</button>
+    <button id="btnSettings" class="ghost">Ayarlar</button>
+  </div>
+</header>
+
+<div class="research-banner"><span class="clinical-only">Araştırma amaçlı karar destek yazılımıdır. Tüm ölçüm ve kategoriler radyolog tarafından onaylanmalıdır.</span><span class="annot-only">Etiketleme modu: kayıtlar eğitim veri setine gider. Hasta adı değil, takma kod kullanın.</span><span class="biopsy-only">Biyopsi rehberi araştırma amaçlıdır; iğneyi her zaman görüntüde gözle takip edin.</span></div>
+
+<main class="layout">
+  <section class="viewer-col">
+    <div class="view-tabs" role="tablist">
+      <button class="tab active" data-view="transverse" role="tab">Transvers <kbd>1</kbd><i class="dot" id="dotTransverse"></i></button>
+      <button class="tab" data-view="longitudinal" role="tab">Longitudinal <kbd>2</kbd><i class="dot" id="dotLongitudinal"></i></button>
+    </div>
+
+    <div class="viewer" id="viewer">
+      <img id="live" alt="Canlı USG görüntüsü">
+      <canvas id="cv"></canvas>
+      <div class="viewer-badge" id="viewerBadge">CANLI</div>
+      <div class="contour-bar" id="contourBar" hidden role="toolbar" aria-label="Kontur">
+        <span class="cb-state" id="cbState"></span>
+        <button id="cbConfirm" class="primary" title="Konturu onayla">Onayla <kbd>Enter</kbd></button>
+        <button data-cb="edit" title="Konturu sürükleyerek düzelt">Düzenle <kbd>E</kbd></button>
+        <button data-cb="splice" title="Konturun bir bölümünü yeniden çiz">Kısmi düzelt <kbd>K</kbd></button>
+        <button data-cb="draw" title="Konturu baştan çiz">Yeniden çiz <kbd>D</kbd></button>
+        <button id="cbAi" title="Nodüle tıklayarak AI'ı yeniden çalıştır">AI tekrar <kbd>A</kbd></button>
+        <span class="cb-sep"></span>
+        <button id="cbUndo" class="ghost" title="Geri al (Ctrl+Z)" aria-label="Geri al">&#8630;</button>
+        <button id="cbRedo" class="ghost" title="Yinele (Ctrl+Y)" aria-label="Yinele">&#8631;</button>
+        <button id="cbDelete" class="ghost" title="Konturu sil (Del)">Sil</button>
+      </div>
+      <canvas id="ov" class="biopsy-only"></canvas>
+      <div class="bx-hint biopsy-only" id="bxHint" hidden></div>
+      <div class="viewer-msg" id="viewerMsg"></div>
+      <div class="viewer-state" id="viewerState" hidden>
+        <div class="vs-icon" id="vsIcon"></div>
+        <div class="vs-title" id="vsTitle"></div>
+        <div class="vs-text" id="vsText"></div>
+      </div>
+    </div>
+
+    <div class="toolbar not-biopsy">
+      <div class="group">
+        <button id="btnFreeze" class="primary">Dondur <kbd>Space</kbd></button>
+        <label class="btn ghost" for="fileInput">Görüntü yükle</label>
+        <input type="file" id="fileInput" accept="image/*,.dcm,application/dicom" hidden>
+      </div>
+      <div class="group tools" id="tools">
+        <button data-tool="ai" title="Nodülün üzerine tıklayın">AI segmentasyon <kbd>A</kbd></button>
+        <button data-tool="width">Genişlik <kbd>W</kbd></button>
+        <button data-tool="ap">AP <kbd>H</kbd></button>
+        <button data-tool="length">Uzunluk <kbd>L</kbd></button>
+        <button data-tool="draw" title="Basılı tutup sınırı çizin ya da noktalarla tıklayın">Elle çiz <kbd>D</kbd></button>
+        <button data-tool="edit" title="Konturu tutup sürükleyerek düzeltin">Düzenle <kbd>E</kbd></button>
+        <button data-tool="splice" title="Konturun bir bölümünü yeniden çizin">Kısmi düzelt <kbd>K</kbd></button>
+        <button id="btnClearView" class="ghost" title="Bu görünümdeki kontur ve ölçümleri sil">Temizle</button>
+      </div>
+    </div>
+    <div class="hint not-biopsy" id="hint">Nodülü ekrana getirip <b>Dondur</b>'a basın.</div>
+  </section>
+
+  <aside class="panel">
+    <div class="card biopsy-only bx-card">
+      <h2>Biyopsi rehberi</h2>
+      <div class="bx-status" id="bxStatus" data-s="searching">İğne aranıyor</div>
+      <div class="bx-warn" id="bxWarn"></div>
+      <div class="bx-metrics">
+        <div><span>Uç – hedef</span><b id="bxTipT">–</b></div>
+        <div><span>Tahmini sapma</span><b id="bxMiss">–</b></div>
+        <div><span>Kalan yol</span><b id="bxRemain">–</b></div>
+        <div><span>İğne açısı</span><b id="bxAngle">–</b></div>
+        <div><span>Plan farkı</span><b id="bxAngDiff">–</b></div>
+        <div><span>Uç derinliği</span><b id="bxDepth">–</b></div>
+      </div>
+      <div class="row bx-plan">
+        <button id="bxPickTarget" type="button">Hedefi seç <kbd>T</kbd></button>
+        <button id="bxPickEntry" type="button">Giriş noktası <kbd>G</kbd></button>
+        <button id="bxClear" type="button" class="ghost">Planı temizle</button>
+      </div>
+      <div class="grid2">
+        <label>Hedef yarıçapı (mm)<input id="bxRadius" type="number" min="1" max="30" step="0.5" value="5"></label>
+        <label>Çalışma no<input id="bxStudy" placeholder="Hasta adı girmeyin"></label>
+      </div>
+      <label class="check"><input type="checkbox" id="bxTrack" checked> Hedef dokuyla birlikte hareket etsin (solunum, prob)</label>
+      <div class="bx-session">
+        <div class="bx-sess-head">
+          <b>İşlem oturumu</b>
+          <button id="bxSess" type="button">İşlemi başlat <kbd>B</kbd></button>
+        </div>
+        <div class="bx-metrics bx-sess-metrics">
+          <div><span>Süre</span><b id="bxSDur">–</b></div>
+          <div><span>Uç görüntüde</span><b id="bxSView">–</b></div>
+          <div><span>Hedefe ulaşma</span><b id="bxSTgt">–</b></div>
+          <div><span>En yakın</span><b id="bxSMin">–</b></div>
+          <div><span>Rotada</span><b id="bxSOn">–</b></div>
+          <div><span>En büyük sapma</span><b id="bxSMiss">–</b></div>
+        </div>
+      </div>
+      <div class="bx-anat">
+        <label class="check"><input type="checkbox" id="bxAnat"> Canlı anatomi katmanı</label>
+        <div class="bx-legend" id="bxLegend"></div>
+        <div class="muted" id="bxAnatInfo"></div>
+      </div>
+      <div class="row end"><button id="bxSnap" class="primary" type="button">İğne konumunu kaydet <kbd>F</kbd></button></div>
+      <div class="muted" id="bxPerf"></div>
+      <p class="muted bx-note">İğne, görüntü işlemeyle (model olmadan) algılanır; gecikmeli ya da hatalı olabilir. Rehber yalnızca yardımcıdır, iğneyi her zaman görüntüde gözle takip edin.</p>
+    </div>
+
+    <div class="card not-biopsy">
+      <h2>Boyutlar <small id="calWarn" class="warn" hidden>kalibrasyon yok</small></h2>
+      <div class="dims">
+        <label>Transvers genişlik<input type="number" step="0.1" min="0" id="mWidth" placeholder="mm"></label>
+        <label>AP<input type="number" step="0.1" min="0" id="mAp" placeholder="mm"></label>
+        <label>Longitudinal<input type="number" step="0.1" min="0" id="mLength" placeholder="mm"></label>
+      </div>
+      <div class="dim-summary"><span>En büyük boyut: <b id="mMax">–</b></span><span id="shapeHint"></span></div>
+      <div class="ai-info" id="aiInfo"></div>
+    </div>
+
+    <div class="card not-biopsy">
+      <h2>ACR TI-RADS</h2>
+      <form id="tiradsForm" autocomplete="off"></form>
+    </div>
+
+    <div class="card annot-only">
+      <h2>Etiket</h2>
+      <div class="grid2">
+        <label>Hasta takma kodu<input id="annPatient" placeholder="ör. P0001" autocomplete="off"></label>
+        <label>Nodül<span class="row"><input id="annNodule" value="N1" autocomplete="off"><button id="btnNextNodule" type="button" class="ghost" title="Aynı hastada sonraki nodül">+</button></span></label>
+      </div>
+      <label>Etiketleyen<input id="annotator" placeholder="Ad Soyad"></label>
+      <div class="struct-pick">
+        <span class="muted">Çizilen yapı</span>
+        <div class="struct-btns" id="structBtns"></div>
+        <div class="muted struct-hint">Nodül zorunlu değil: yalnızca anatomi çizilmiş kareler "nodül yok" örneği olarak kaydedilir. Ölçümler nodülden alınır.</div>
+      </div>
+      <label class="check"><input type="checkbox" id="annNegative"> Bu karede nodül yok (negatif örnek)</label>
+      <div class="muted" id="annHint">Kesit: <b id="annView">Transvers</b> · TI-RADS formu isteğe bağlı (doldurulursa birlikte kaydedilir).</div>
+      <div class="row end">
+        <button id="btnAnnSave" class="primary">Etiketi kaydet <kbd>S</kbd></button>
+      </div>
+      <div class="ds-stats" id="dsStats"></div>
+      <details class="ds-recent"><summary>Son kayıtlar</summary><div id="dsRecent"></div></details>
+      <div class="row end">
+        <button id="btnExport" type="button" class="ghost">Eğitim için dışa aktar</button>
+      </div>
+      <div class="muted" id="exportOut"></div>
+    </div>
+
+    <div class="card result clinical-only" id="resultCard">
+      <div class="result-head">
+        <div class="tr" id="trLevel">TR –</div>
+        <div class="pts"><span id="trPoints">–</span> puan</div>
+      </div>
+      <div class="breakdown" id="breakdown"></div>
+      <div class="rec" id="recText">Formu doldurun.</div>
+      <div class="notes" id="scoreNotes"></div>
+    </div>
+
+    <div class="card clinical-only">
+      <h2>Kaydet</h2>
+      <div class="grid2">
+        <label>Çalışma / protokol no<input id="studyNo" placeholder="Hasta adı girmeyin"></label>
+        <label>Lokalizasyon
+          <span class="row">
+            <select id="locSide"><option value="">Lob</option><option value="right">Sağ</option><option value="left">Sol</option><option value="isthmus">İstmus</option></select>
+            <select id="locPole"><option value="">Seviye</option><option value="upper">Üst</option><option value="mid">Orta</option><option value="lower">Alt</option></select>
+          </span>
+        </label>
+      </div>
+      <label>Radyolog<input id="radiologist" placeholder="Ad Soyad"></label>
+      <label>Not<textarea id="notes" rows="2"></textarea></label>
+      <label class="check"><input type="checkbox" id="approved"> Konturları, ölçümleri ve kategoriyi kontrol ettim, onaylıyorum.</label>
+      <div class="warn save-block" id="saveBlock"></div>
+      <div class="row end">
+        <button id="btnNew" class="ghost">Yeni nodül</button>
+        <button id="btnSave" class="primary" disabled>Onayla ve kaydet</button>
+      </div>
+      <pre class="report" id="report" hidden></pre>
+    </div>
+  </aside>
+</main>
+
+<dialog id="dlgSettings">
+  <form method="dialog" class="dlg-head"><h2>Ayarlar</h2><button class="ghost">Kapat</button></form>
+
+  <section>
+    <h3>Görüntü kaynağı</h3>
+    <div class="grid3">
+      <label>Tür<select id="srcType">
+        <option value="auto">Otomatik – capture card (önerilen)</option>
+        <option value="device">Elle cihaz numarası</option>
+        <option value="file">Video dosyası</option>
+        <option value="demo">Demo (sentetik)</option></select></label>
+      <label class="src-device">Cihaz no<input id="srcIndex" type="number" min="0" value="0"></label>
+      <label class="src-file">Dosya yolu<input id="srcPath" placeholder="/yol/video.mp4"></label>
+      <label>Format<select id="srcFourcc"><option value="auto">Otomatik (en iyisi denenir)</option><option>YUY2</option><option>NV12</option><option>MJPG</option></select></label>
+      <label class="src-manual">Genişlik<input id="srcW" type="number" value="1920"></label>
+      <label class="src-manual">Yükseklik<input id="srcH" type="number" value="1080"></label>
+    </div>
+    <div class="row end"><button id="btnSrcApply" type="button" class="primary">Uygula</button></div>
+    <div class="dev-head"><b>Bulunan video cihazları</b><button id="btnProbe" type="button" class="ghost">Yenile</button></div>
+    <div class="dev-list" id="devList"><span class="muted">Yükleniyor…</span></div>
+    <p class="muted">Otomatik modda capture card takıldığı anda bağlanılır, çıkarılınca beklenir. Dahili kameralar seçilmez. Sıkıştırmasız format (YUY2/NV12) önceliklidir; kart yalnızca MJPG verebiliyorsa uyarı gösterilir.</p>
+    <details class="dev-log"><summary>Bağlantı günlüğü</summary><pre id="devLog"></pre></details>
+  </section>
+
+  <section>
+    <h3>Ekran alanları</h3>
+    <p class="muted">Önce görüntüyü dondurun, sonra ekranda sürükleyerek çizin.</p>
+    <div class="row">
+      <button type="button" class="ghost" data-area="roi">Görüntü alanını (ROI) çiz</button>
+      <button type="button" class="ghost" data-area="privacy">Gizlilik maskesi ekle</button>
+      <button type="button" class="ghost" id="btnClearAreas">Alanları temizle</button>
+    </div>
+    <div class="muted" id="areaInfo"></div>
+  </section>
+
+  <section>
+    <h3>Kalibrasyon</h3>
+    <p class="muted">Derinlik skalasında bilinen mesafedeki iki çentiğe tıklayın. Cihazda derinlik/zoom değişince yeniden kalibre edin ya da kayıtlı ön ayarı seçin.</p>
+    <div class="row">
+      <button type="button" class="ghost" id="btnCalib">Skaladan kalibre et</button>
+      <label class="inline">mm/piksel <input id="calManual" type="number" step="0.0001" min="0"></label>
+      <button type="button" class="ghost" id="btnCalManual">Ayarla</button>
+    </div>
+    <div class="row">
+      <label class="inline">Ön ayar adı <input id="calName" placeholder="ör. 4 cm derinlik"></label>
+      <button type="button" class="ghost" id="btnCalSave">Kaydet</button>
+    </div>
+    <div class="presets" id="calPresets"></div>
+  </section>
+
+  <section>
+    <h3>Segmentasyon modeli (UNet++)</h3>
+    <div class="grid3">
+      <label>Model dosyası<input id="mdlPath" placeholder="models/unetpp.pth"></label>
+      <label>Tür<select id="mdlBackend"><option value="auto">Otomatik (.pth/.onnx)</option><option value="torch">PyTorch</option><option value="onnx">ONNX</option><option value="demo">Demo (klinik değil)</option><option value="none">Kapalı</option></select></label>
+      <label>Encoder<input id="mdlEncoder" placeholder="resnet34"></label>
+      <label>Giriş kanalı<select id="mdlCin"><option>3</option><option>1</option></select></label>
+      <label>Sınıf sayısı<input id="mdlClasses" type="number" min="1" value="1"></label>
+      <label>Giriş boyutu (G×Y)<input id="mdlSize" placeholder="512x512"></label>
+      <label>Normalizasyon<select id="mdlNorm"><option value="imagenet">ImageNet</option><option value="zero_one">0–1</option><option value="zscore">z-skor</option></select></label>
+      <label>Eşik<input id="mdlThr" type="number" step="0.05" min="0.05" max="0.95" value="0.5"></label>
+    </div>
+    <div class="muted" id="mdlStatus"></div>
+    <div class="row end"><button id="btnMdlApply" type="button" class="primary">Modeli yükle</button></div>
+  </section>
+</dialog>
+
+<dialog id="dlgCases">
+  <form method="dialog" class="dlg-head"><h2>Kayıtlı vakalar</h2><button class="ghost">Kapat</button></form>
+  <div id="caseList" class="case-list"></div>
+  <pre class="report" id="caseReport" hidden></pre>
+</dialog>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
